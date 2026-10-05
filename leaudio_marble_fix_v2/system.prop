@@ -5,6 +5,11 @@ bluetooth.profile.hap.client.enabled=true
 bluetooth.profile.mcp.server.enabled=true
 bluetooth.profile.vcp.controller.enabled=true
 
-# Force software LC3 codec path (disable hardware offload to ADSP)
-persist.bluetooth.leaudio_offload.disabled=true
-ro.bluetooth.leaudio_offload.supported=false
+# LE Audio 走硬件 offload（控制器侧 LC3 编码），不再用主机（软件）路径。
+# 原因：软件路径在本固件上不可行 —— QTI 的 UART/daemon 传输不支持 HCI ISO 包，
+# 第一个 ISO 包发出后约 90ms 控制器即停止响应，随后
+#   CheckForUartFailureCode: UART driver returns err code = 0x51
+#   -> Hardware Error 0x0F -> SSR -> HAL 死亡 -> 栈 abort（"没声音 + 3-4 秒蓝牙重启"）
+# offload 能力文件见 vendor/etc/le_audio_codec_capabilities.xml（原厂缺失）。
+persist.bluetooth.leaudio_offload.disabled=false
+ro.bluetooth.leaudio_offload.supported=true

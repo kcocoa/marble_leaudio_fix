@@ -180,7 +180,26 @@ v3.11 已能正确剥离 4 字节 framed 头（`hcilen 155 -> 151`，SDU 变成 
 
 ### 下一步：改走硬件 offload（控制器侧编码，主机不发 ISO）
 
-阻塞点已查明是**配置缺失**，不是 HAL 不支持：
+**根因已定位到具体文件**：反汇编 `libbluetooth_audio_session_aidl.so` 得到
+
+```
+BluetoothAudioCodecs::GetLeAudioOffloadCodecCapabilities()
+  -> BluetoothLeAudioCodecsProvider::ParseFromLeAudioOffloadSettingFile()
+       readLeAudioOffloadSetting("/vendor/etc/le_audio_codec_capabilities.xml")
+  -> GetLeAudioCodecCapabilities(optional<LeAudioOffloadSetting>)
+```
+
+**`/vendor/etc/le_audio_codec_capabilities.xml` 在原厂镜像里根本不存在** —— 所以 setting 为空、
+上报 0 codec。该文件已按 AOSP 参考 schema（`hardware/interfaces/bluetooth/audio/utils/
+le_audio_codec_capabilities/le_audio_codec_capabilities.xml`）为本机写好，放在
+`leaudio_marble_fix_v2/vendor/etc/le_audio_codec_capabilities.xml`（LC3 16/24/32/48kHz、
+7.5/10ms、octets 30/40/60/80/120/155，含 MONO/STEREO 单/双 CIS 策略）。
+
+HAL 是**每次查询都重新读文件**（`ParseFromLeAudioOffloadSettingFile` 在
+`GetLeAudioOffloadCodecCapabilities` 内部调用），所以文件一旦可见即生效，无需重启 audioserver。
+但 **KernelSU overlay 只挂载已存在的子目录，新增的 `vendor/etc/` 顶层文件需要重启**才会出现。
+
+原始阻塞描述（供参考）：
 
 ```
 E BTAudioCodecsProviderAidl: GetLeAudioCodecCapabilities:

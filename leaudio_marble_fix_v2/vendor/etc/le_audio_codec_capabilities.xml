@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!---
+  LE Audio hardware offload capability settings for marble (Redmi Note 12 Turbo).
+
+  This file is MISSING from the stock vendor image, which is why
+  BluetoothLeAudioCodecsProvider::ParseFromLeAudioOffloadSettingFile()
+  (libbluetooth_audio_session_aidl.so, path /vendor/etc/le_audio_codec_capabilities.xml)
+  failed and the audio HAL reported:
+
+      BTAudioCodecsProviderAidl: GetLeAudioCodecCapabilities:
+          input le_audio_offload_setting content need to be non empty
+      BTAudioProviderFactoryAIDL: SessionType=LE_AUDIO_HARDWARE_OFFLOAD_ENCODING_DATAPATH supports 0 codecs
+      BTAudioClientAIDL: FetchAudioProvider: SessionType=... Not supported by BluetoothAudioHal
+
+  Schema follows AOSP hardware/interfaces/bluetooth/audio/utils/le_audio_codec_capabilities/
+  le_audio_codec_capabilities.xml. Values cover what the ROSELINK earbuds advertise
+  (8/16/24/32/48 kHz, 7.5/10 ms, up to 155 octets per codec frame) so the offload
+  (controller-side LC3 encoding) data path can be selected instead of the host
+  (software) path, which is unusable on this firmware: the QTI UART/daemon transport
+  cannot carry HCI ISO packets and the controller asserts ~90 ms after the first one.
+-->
+<leAudioOffloadSetting>
+  <scenarioList>
+    <!-- encode only -->
+    <scenario encode="OneChanMono_16_2" decode="invalid"/>
+    <scenario encode="OneChanStereo_16_2" decode="invalid"/>
+    <scenario encode="TwoChanStereo_16_2" decode="invalid"/>
+    <scenario encode="OneChanMono_32_2" decode="invalid"/>
+    <scenario encode="OneChanStereo_32_2" decode="invalid"/>
+    <scenario encode="TwoChanStereo_32_2" decode="invalid"/>
+    <scenario encode="OneChanMono_48_2" decode="invalid"/>
+    <scenario encode="OneChanStereo_48_2" decode="invalid"/>
+    <scenario encode="TwoChanStereo_48_2" decode="invalid"/>
+    <scenario encode="TwoChanStereo_48_2_155" decode="invalid"/>
+    <!-- encode and decode (bidirectional, e.g. calls) -->
+    <scenario encode="OneChanMono_16_2" decode="OneChanMono_16_2"/>
+    <scenario encode="TwoChanStereo_16_2" decode="OneChanMono_16_2"/>
+    <scenario encode="OneChanStereo_16_2" decode="OneChanStereo_16_2"/>
+    <scenario encode="OneChanMono_32_2" decode="OneChanMono_32_2"/>
+    <scenario encode="TwoChanStereo_32_2" decode="OneChanMono_32_2"/>
+    <scenario encode="OneChanStereo_32_2" decode="OneChanStereo_32_2"/>
+    <scenario encode="OneChanMono_48_2" decode="OneChanMono_48_2"/>
+    <scenario encode="TwoChanStereo_48_2" decode="OneChanMono_48_2"/>
+    <scenario encode="OneChanStereo_48_2" decode="OneChanStereo_48_2"/>
+  </scenarioList>
+
+  <configurationList>
+    <configuration name="OneChanMono_16_2"   codecConfiguration="LC3_16k_2"   strategyConfiguration="MONO_ONE_CIS_PER_DEVICE"/>
+    <configuration name="OneChanStereo_16_2" codecConfiguration="LC3_16k_2"   strategyConfiguration="STEREO_ONE_CIS_PER_DEVICE"/>
+    <configuration name="TwoChanStereo_16_2" codecConfiguration="LC3_16k_2"   strategyConfiguration="STEREO_TWO_CISES_PER_DEVICE"/>
+    <configuration name="OneChanMono_32_2"   codecConfiguration="LC3_32k_2"   strategyConfiguration="MONO_ONE_CIS_PER_DEVICE"/>
+    <configuration name="OneChanStereo_32_2" codecConfiguration="LC3_32k_2"   strategyConfiguration="STEREO_ONE_CIS_PER_DEVICE"/>
+    <configuration name="TwoChanStereo_32_2" codecConfiguration="LC3_32k_2"   strategyConfiguration="STEREO_TWO_CISES_PER_DEVICE"/>
+    <configuration name="OneChanMono_48_2"   codecConfiguration="LC3_48k_2"   strategyConfiguration="MONO_ONE_CIS_PER_DEVICE"/>
+    <configuration name="OneChanStereo_48_2" codecConfiguration="LC3_48k_2"   strategyConfiguration="STEREO_ONE_CIS_PER_DEVICE"/>
+    <configuration name="TwoChanStereo_48_2" codecConfiguration="LC3_48k_2"   strategyConfiguration="STEREO_TWO_CISES_PER_DEVICE"/>
+    <configuration name="TwoChanStereo_48_2_155" codecConfiguration="LC3_48k_2_155" strategyConfiguration="STEREO_TWO_CISES_PER_DEVICE"/>
+  </configurationList>
+
+  <codecConfigurationList>
+    <codecConfiguration name="LC3_16k_1"     codec="LC3" samplingFrequency="16000" frameDurationUs="7500"  octetsPerCodecFrame="30"/>
+    <codecConfiguration name="LC3_16k_2"     codec="LC3" samplingFrequency="16000" frameDurationUs="10000" octetsPerCodecFrame="40"/>
+    <codecConfiguration name="LC3_24k_2"     codec="LC3" samplingFrequency="24000" frameDurationUs="10000" octetsPerCodecFrame="60"/>
+    <codecConfiguration name="LC3_32k_2"     codec="LC3" samplingFrequency="32000" frameDurationUs="10000" octetsPerCodecFrame="80"/>
+    <codecConfiguration name="LC3_48k_2"     codec="LC3" samplingFrequency="48000" frameDurationUs="10000" octetsPerCodecFrame="120"/>
+    <codecConfiguration name="LC3_48k_2_155" codec="LC3" samplingFrequency="48000" frameDurationUs="10000" octetsPerCodecFrame="155"/>
+  </codecConfigurationList>
+
+  <strategyConfigurationList>
+    <strategyConfiguration name="STEREO_ONE_CIS_PER_DEVICE"   audioLocation="STEREO" connectedDevice="2" channelCount="1" audioChannelAllocation="3"/>
+    <strategyConfiguration name="STEREO_TWO_CISES_PER_DEVICE" audioLocation="STEREO" connectedDevice="1" channelCount="2" audioChannelAllocation="3"/>
+    <strategyConfiguration name="MONO_ONE_CIS_PER_DEVICE"     audioLocation="MONO"   connectedDevice="1" channelCount="1" audioChannelAllocation="4"/>
+    <strategyConfiguration name="BROADCAST_STEREO"            audioLocation="STEREO" connectedDevice="0" channelCount="2" audioChannelAllocation="3"/>
+  </strategyConfigurationList>
+</leAudioOffloadSetting>
