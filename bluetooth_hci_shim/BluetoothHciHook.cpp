@@ -945,33 +945,38 @@ int32_t HandleSendIsoData(const ::android::hardware::Parcel& data,
                                    (((const uint8_t*)buf)[1] << 8)) & 0x0FFF);
     }
     if (gSendDataToController != nullptr && gStockHci != nullptr) {
-        // v3.10: strip the 4-byte framed-SDU prefix.
+        // v3.11: strip the 4-byte framed-SDU header (root cause of the crash).
         //
-        // The CIS is programmed UNFRAMED (Framing=0 in LE Set CIG Parameters,
-        // verified from btsnoop) with Max_SDU = the LC3 frame size (120 / 155),
-        // but the stack hands the HAL framed SDUs:
-        //     [seq:2][len:2][LC3 frame:len]
-        // so the HCI payload is 4 bytes larger than Max_SDU (124 vs 120,
-        // 159 vs 155). Parsing the 2061 ISO packets of a btsnoop capture shows
-        // every one of them carries that prefix (seq 0,1,15,16... with
-        // len=0x0078). The controller asserts on the mismatch ->
-        // HW error 0x0f -> SSR ~4s later, at ANY rate (window=0 too), which is
-        // exactly the "no sound + Bluetooth restarts after 3-4s" symptom.
-        // Strip the prefix so the SDU matches the unframed CIS / Max_SDU.
+        // btsnoop of a streaming attempt (CIG: Framing=0 i.e. UNFRAMED,
+        // Max_SDU_C2P=0x009b=155) shows every SDU is emitted as two HCI ISO
+        // packets:
+        //   len=160 PB=0 hcilen=155  05 05 00 9b 00 | 00 00 | 9a 00 | frame...
+        //   len=  8 PB=3 hcilen=3    05 05 30 03 00 | 34 ...
+        // The first fragment starts with the AOSP framed-SDU header
+        // [seq:2][len:2] where len=0x009a=154, so the SDU is 4+154 = 158 bytes
+        // while the CIS was negotiated UNFRAMED with Max_SDU=155 (the LC3 frame
+        // size). The controller asserts on that: HW error 0x0f -> SSR ~4s later
+        // -> HAL dies -> stack aborts -> "no sound + Bluetooth restarts".
+        // Removing the 4-byte header leaves 151+3 = 154 bytes = exactly the LC3
+        // frame, i.e. <= Max_SDU, and consistent with the unframed CIS.
         uint8_t stripBuf[1024];
         const uint8_t* p = (const uint8_t*)buf;
         if (IsoStrip4Enabled() && p != nullptr && vec->mSize >= 8) {
+            uint32_t hf = (uint32_t)p[0] | ((uint32_t)p[1] << 8);
+            uint32_t pb = (hf >> 12) & 0x3;   // 0=first frag, 3=complete SDU
             uint32_t l = (uint32_t)p[2] | ((uint32_t)p[3] << 8);
-            if (l >= 8 && (uint64_t)l + 4 == vec->mSize) {
-                uint32_t inner = (uint32_t)p[6] | ((uint32_t)p[7] << 8);
-                if (inner > 0 && inner + 4 == l && 4u + inner <= sizeof(stripBuf)) {
-                    memcpy(stripBuf, p, 4);
-                    stripBuf[2] = (uint8_t)(inner & 0xFF);
-                    stripBuf[3] = (uint8_t)(inner >> 8);
-                    memcpy(stripBuf + 4, p + 8, inner);
-                    isoVec.mBuffer = stripBuf;
-                    isoVec.mSize = 4u + inner;
-                }
+            if ((pb == 0 || pb == 3) && l >= 8 && (uint64_t)l + 4 == vec->mSize) {
+                uint32_t newlen = l - 4;
+                memcpy(stripBuf, p, 4);
+                stripBuf[2] = (uint8_t)(newlen & 0xFF);
+                stripBuf[3] = (uint8_t)((newlen >> 8) & 0xFF);
+                memcpy(stripBuf + 4, p + 8, newlen);
+                isoVec.mBuffer = stripBuf;
+                isoVec.mSize = 4u + newlen;
+                static uint32_t sStripLog = 0;
+                if ((++sStripLog & 0x3f) == 1)
+                    LOGI("ISO strip: pb=%u hcilen %u -> %u (sdu hdr seq=%u len=%u)", pb, l,
+                         newlen, (unsigned)(p[4] | (p[5] << 8)), (unsigned)(p[6] | (p[7] << 8)));
             }
         }
         gSendDataToController(gStockHci, 5 /* HciPacketType::ISO_DATA */, &isoVec);
@@ -1217,7 +1222,7 @@ void* HIDL_FETCH_IBluetoothHci(const char* name) {
 // Constructor: runs at dlopen() inside the HAL service process
 // ---------------------------------------------------------------------------
 __attribute__((constructor)) static void ShimInit() {
-    LOGI("BluetoothHciHook v3.10 init (ring ISO patch + strip framed-SDU 4B prefix + live credit window)");
+    LOGI("BluetoothHciHook v3.11 init (ring ISO patch + PB-based framed-SDU header strip + live credit window)");
     ResolveSymbols();
     RegisterBnConstructorHooks();
 }
