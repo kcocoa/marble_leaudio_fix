@@ -224,3 +224,51 @@ I BTAudioProviderFactoryAIDL: SessionType=LE_AUDIO_HARDWARE_OFFLOAD_ENCODING_DAT
 可在 `system.prop` 关闭 BAP profile（`bluetooth.profile.bap.unicast.client.enabled=false`），
 代价是耳机完全不能出声（ROSELINK 是 LE-Audio-only，`A2DP=0` 即禁止）。
 
+### offload 生效 + AudioPolicy 补齐（2026-10-06）
+
+1. `le_audio_codec_capabilities.xml` 补齐后（需重启才被 overlay 挂上），HAL 上报：
+
+   ```
+   BTAudioProviderFactoryAIDL: getProviderCapabilities -
+     SessionType=LE_AUDIO_HARDWARE_OFFLOAD_ENCODING_DATAPATH supports 19 codecs
+   ```
+
+   原为 `supports 0 codecs`。offload 路径从此可用，主机不再发 ISO 包，控制器不再崩。
+
+2. 但音频仍留在扬声器。APM 日志：
+
+   ```
+   W APM_AudioPolicyManager: checkOutputsForDevice(): No output available for device 20000000
+   E APM::HwModule: createDevice: could not find HW module for device type
+        'AUDIO_DEVICE_IN_BLE_HEADSET' (a0000000)
+   E AS.AudioDeviceInventory: APM failed to make available LE Audio device error=1
+   ```
+
+   原因：模块内 `audio_policy_configuration.xml` 的 `bluetooth` 模块是手写残缺版 ——
+   只有 `ble output` 一个 mixPort、两个输出 devicePort，**没有 BLE 输入（麦克风）**，
+   也没有 A2DP 端口。AudioService 把 LE Audio 当输入+输出组合设备，输入创建失败 →
+   设备在 AudioPolicy 里不可用 → 路由永不切换。
+
+   另注：`checkOutputsForDevice` 里 `No output available` 有**两处**，第二处是
+   "profile 找到了但 `openOutputWithProfileAndDevice` 失败被 erase"，日志里
+   `AudioFlinger: openOutput() ... BLE_HEADSET` 紧邻该警告，说明命中的是第二处。
+
+3. 已补全 `bluetooth` 模块（`halVersion="2.0"`，与 AOSP
+   `frameworks/av/services/audiopolicy/config/bluetooth_audio_policy_configuration.xml`
+   结构对齐；设备 VINTF 见 `/vendor/etc/vintf/manifest/bluetooth_audio.xml`，
+   为 AIDL `android.hardware.bluetooth.audio` v5）：
+
+   * mixPorts：`a2dp output` / `hearing aid output` / `ble output` / `ble input`
+   * devicePorts：`BT A2DP Out/Headphones/Speaker` / `BT Hearing Aid Out` /
+     `BLE Headset Out` / `BLE Speaker Out` / `BLE Broadcast Out` / `BLE Headset In`
+   * routes：以上全部对应
+
+4. 踩坑（本 ROM 特有）：
+
+   * `setprop ctl.restart audioserver` 之后 AudioFlinger **只加载 primary 模块**
+     （usb/r_submix/bluetooth 全部丢失），`ctl.restart android.hardware.audio.service`
+     也失败（"See dmesg for error reason"）→ 验证 policy 改动必须**重启设备**。
+   * KernelSU overlay：修改模块里**已存在**的文件是即时可见的；**新增**文件要重启才出现
+     （`le_audio_codec_capabilities.xml` 就是这样才生效的）。
+   * 临时 bind mount 覆盖 `/vendor/etc/audio/sku_ukee/audio_policy_configuration.xml`
+     对默认命名空间可见（非 root shell 也能读到），但同样需要 audioserver 重载才生效。
