@@ -374,3 +374,44 @@ $NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ \
   vendor 代码里 `ldr x9,[x?,#0x30]; blr x9` + 前置 `__cfi_slowpath` = 虚调用指纹
 - **CFI 侦察法**：`llvm-objdump -d | grep -c "__cfi_slowpath@plt>"` —— 钩子目标库必须做此检查；
   iface/hidlbase 库无 CFI（钩子安全），vendor impl 库重度 CFI（578 处，vptr shadow 高危）
+
+## 2026-10-06 00:35 状态（重启验证 offload + policy 修复）
+
+### 已解决
+- **控制器崩溃**：offload 路径打通（`le_audio_codec_capabilities.xml` 补齐后 HAL 报
+  `supports 19 codecs`），主机不再发 ISO 包 → 无 UART 失败、无 SSR、无 HAL 死亡，
+  音乐可持续播放不再 4 秒中断。
+- **policy 配置**：`audio_policy_configuration.xml` 的 `bluetooth` 模块补全
+  （`ble output` / **`ble input`** / A2DP / hearing aid + 8 个 devicePort + routes）。
+  重启后 `dumpsys media.audio_policy` 确认 4 模块齐全、BLE 端口齐全。
+
+### 仍未解决：音频路由不切到耳机
+现象（重启后）：
+- 耳机 LE Audio 侧**全部 Connected**（LeAudioStateMachine ×2、CsipSetCoordinator ×2、
+  VolumeControl ×2、Battery ×2）
+- 栈侧**已设活动设备**：`[API call] setActiveDevice: device=XX:XX:XX:XX:A7:C8`
+  + `[To AudioManager]: handleBluetoothActiveDeviceChanged ... isLeOutput: true`
+- **但**：`dumpsys media.audio_policy` 的 Available output devices **只有 3 个静态设备**
+  （Earpiece / Speaker / Telephony Tx），**BLE 耳机不在其中**
+- 且本轮 logcat **完全没有** APM/AudioDeviceInventory 的
+  `failed to make available` / `No output available` 日志
+  → 说明「LE 设备连接状态」根本没送达 AudioPolicy（不是 openOutput 失败）
+- 媒体路由：`selected = ROUTE_ID_BUILTIN_SPEAKER`，`LE_AUDIO_1 | ROSELINK`
+  存在于 `mTransferableRoutes`，但 `RouterInfoMediaManager: onTransferFailure()` 报切换失败
+
+### 环境事实（本 ROM）
+- 设备时钟比主机慢约 30 分钟；`/proc/uptime` 才是可靠的启动时间
+- logcat 缓冲很小（~3 分钟 / 约 12k 行），排查必须**实时抓**
+- `setprop ctl.restart audioserver` → AudioFlinger 只加载 primary；
+  `ctl.restart android.hardware.audio.service` 失败（See dmesg）→ 只能重启设备
+- KernelSU overlay：改**已存在**的文件即时生效；**新增**文件需重启
+- AIDL BT audio HAL：`/vendor/etc/vintf/manifest/bluetooth_audio.xml`
+  （`android.hardware.bluetooth.audio` v5，`IBluetoothAudioProviderFactory/default`）
+- `audio.bluetooth.default.so` 存在（policy 里 `halVersion="2.0"` 对应它）
+
+### 下一步
+1. 实时 logcat 抓「在输出切换器里选耳机」这一刻：看 AudioService 是否调用
+   `setDeviceConnectionState(AUDIO_DEVICE_OUT_BLE_HEADSET, AVAILABLE)`
+2. 若无 → 触发侧（LE 设备连接状态上报）问题：考虑重启蓝牙栈 / 关掉
+   LE_AUDIO_BROADCAST profile / 检查 `mUnicastGroupIdDeactivatedForBroadcastTransition`
+3. 若有 → 回到 `checkOutputsForDevice` 第二处失败，抓 HAL 的 `openOutputStream` 错误
