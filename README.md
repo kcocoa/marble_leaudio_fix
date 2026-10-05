@@ -159,8 +159,49 @@ I BTAudioProviderFactoryAIDL: SessionType=LE_AUDIO_HARDWARE_OFFLOAD_ENCODING_DAT
 
 ## 当前状态 / 下一步
 
-- 已部署 **v3.10**：ring 补丁 + credit 窗口（12）+ framed 前缀剥离（未触发）+ 诊断
-- 控制器仍在 ISO 数据开始后 ~4 秒断言 → **待办：重新抓 btsnoop 确认当前会话的 ISO 帧结构与
-  CIG 参数（Max_SDU / Framing）是否一致**
-- 之后：若确认是 framing/尺寸不一致 → 在 shim 里对齐；若是固件不支持软件路径 →
-  改走硬件 offload（补 offload codec 配置）
+### 结论（2026-10-05 23:42）：软件路径在本固件上不可行
+
+v3.11 已能正确剥离 4 字节 framed 头（`hcilen 155 -> 151`，SDU 变成 154 = LC3 帧 ≤ Max_SDU 155），
+**但控制器仍然崩溃**。崩溃点在传输层：
+
+```
+23:42:04.338  第一个 ISO 包转发
+23:42:04.427  栈给 READ_CLOCK(0x1407) 设 2s 超时     ← 控制器 ~90ms 后不再响应
+23:42:06.429  on_hci_timeout: Timed out waiting for READ_CLOCK(0x1407) for 2000ms
+23:42:06.430  CheckForUartFailureCode: UART driver returns err code = 0x51
+23:42:06.430  uart_controller: Captured UART CTS: 1 / Crash kernel TS
+23:42:08.519  Last RX packet: 04 10 01 0F   (Hardware Error 0x0F)
+23:42:08.635  SSR is completed!
+```
+
+且 ring 补丁关闭（ISO 包被 ring buffer 丢弃）时**同样崩溃**（当时 4/4 关联）。
+→ 只要 CIS 被建立（软件路径），控制器必死：**有数据 → 传输层崩；无数据 → 通路饥饿**。
+→ QTI 的 UART/daemon 传输不支持 HCI ISO 包，**软件编码路径在本固件上不可行**。
+
+### 下一步：改走硬件 offload（控制器侧编码，主机不发 ISO）
+
+阻塞点已查明是**配置缺失**，不是 HAL 不支持：
+
+```
+E BTAudioCodecsProviderAidl: GetLeAudioCodecCapabilities:
+    input le_audio_offload_setting content need to be non empty
+I BTAudioProviderFactoryAIDL: SessionType=LE_AUDIO_HARDWARE_OFFLOAD_ENCODING_DATAPATH supports 0 codecs
+```
+
+音频 HAL（`libbluetooth_audio_session_aidl.so`）读取：
+- `/vendor/etc/aidl/le_audio/aidl_default_audio_set_configurations.json`（存在，191KB，但无 offload 会话条目）
+- `/vendor/etc/aidl/le_audio/aidl_audio_set_configurations.json`（**设备覆盖，不存在**）
+
+要做的：
+1. 模块 `system.prop` 恢复 `ro.bluetooth.leaudio_offload.supported=true`、
+   去掉 `persist.bluetooth.leaudio_offload.disabled=true`（`ro.` 属性需重启生效）
+2. 通过模块 overlay 补一份带 `LE_AUDIO_HARDWARE_OFFLOAD_ENCODING_DATAPATH` codec 能力的
+   `aidl_audio_set_configurations.json`
+3. 验证 offload 会话上报非 0 codec，再测播放
+
+### 稳定性取舍
+
+在 offload 打通之前，模块会**主动触发**软件路径 → 一放音乐就崩。若要暂时消除崩溃，
+可在 `system.prop` 关闭 BAP profile（`bluetooth.profile.bap.unicast.client.enabled=false`），
+代价是耳机完全不能出声（ROSELINK 是 LE-Audio-only，`A2DP=0` 即禁止）。
+
