@@ -300,3 +300,35 @@ I BTAudioProviderFactoryAIDL: SessionType=LE_AUDIO_HARDWARE_OFFLOAD_ENCODING_DAT
    - `dumpsys audio`: `Devices: ble_headset(20000000)`
    - `dumpsys media.audio_flinger`: `Patch 52 ... first device type 20000000`
    - 播放状态：歌曲正常播放并自动切歌（Track 3 -> Track 4），**无掉线、无卡死、无芯片 SSR 崩溃**！
+
+### 硬件 Offload 路线终局结论与技术复盘（2026-10-06 01:30）
+
+经过对高通专有 BSP（`audio.primary.taro.so`、`libar-pal.so`、`btaudio_offload_if.so`）及 AOSP 音频框架的深度逆向与动态执行跟踪，**确定高通硬件 Offload 在本设备现有 vendor 二进制库下为物理死路**。完整证据链记录如下：
+
+#### 1. 突破过程与解开的表层阻塞
+- **XML 能力文件缺失**：原厂缺少 `/vendor/etc/le_audio_codec_capabilities.xml`，导致 HAL 上报 `supports 0 codecs`。补齐 AOSP 规范文件后，HAL 成功上报 `supports 19 codecs`。
+- **AOSP HAL SessionType 硬编码**：`/vendor/lib64/hw/audio.bluetooth.default.so` 的 `init_session_type` 将 `0x20000000` (BLE 耳机) 写死为 Session 4 (软件模式)。打二进制补丁改为 Session 6 (`HARDWARE_OFFLOAD_ENCODING`)，解决 `is not ready` 拒绝打开流的问题。
+- **AudioPolicy 格式查询限制**：`AudioPolicyManager::getHwOffloadFormatsSupportedForBluetoothMedia` 硬编码只检查 `primary` 模块。在 `primary` 补充 `BLE Headset Out` (含 `encodedFormats="AUDIO_FORMAT_LC3"`) 后，系统识别到 LC3 Offload 格式，成功将路由切入 `ble_headset(20000000)`。
+
+#### 2. 无法逾越的高通专有库死穴（物理未实现）
+路由切换成功后，AudioFlinger 持续向底层写入数据（Total writes > 5000），但耳机完全静音。抓取动态调用链：
+```text
+AHAL: AudioDevice: CreateAudioPatch: Playback patch to device 20000000
+PAL: Device: open: Enter. device id 21 (PAL_DEVICE_OUT_BLUETOOTH_BLE)
+PAL: API: pal_stream_start: Enter. Stream handle
+btaudio_offload: audio_stream_start: state = AUDIO_A2DP_STATE_STOPPED
+btaudio_offload: audio_get_codec_config: state = AUDIO_A2DP_STATE_STOPPED
+PAL: Bluetooth: startPlayback: 1746: invalid encoder config
+PAL: StreamPCM: start: 451: Rx device start failed with status -22
+```
+
+**逆向反汇编证据**：
+1. **`/vendor/lib64/btaudio_offload_if.so`**：
+   字符串与符号表仅包含 `AUDIO_A2DP_STATE_*`（`STANDBY`, `SUSPENDED`, `STARTED`, `STOPPED`），该库是纯粹的经典蓝牙 A2DP Offload 胶水层，**完全没有 LE Audio 相关实现**。
+2. **`/vendor/lib64/libar-pal.so` (`BtA2dp::startPlayback` @ `0xc5828`)**：
+   PAL 处理 `PAL_DEVICE_OUT_BLUETOOTH_BLE`（Device 21）时仍然复用 `BtA2dp` 类，调用 `btaudio_offload` 的 `audio_stream_start(6)`。
+   由于系统当前连接的是 LE Audio 单播会话而非 A2DP，`btaudio_offload` 报告 A2DP 为 `STOPPED`，`audio_get_codec_config` 返回空配置（`cbz x0, 0xc5c44`），PAL 判定为 `invalid encoder config`（行号 1746）并强制关闭音频流（`-22 = EINVAL`）。
+
+#### 3. 最终结论
+Redmi Note 12 Turbo (marble) 所搭载的高通 SM7475 平台 vendor 二进制库从未完成 LE Audio 的 ADSP 硬件编码打通。开启硬件 Offload 只会将音频送入尚未完工的高通专有库并被静音丢弃。
+**唯一起效且真正能发出声音的路径是软件编码（Host LC3）路径。**

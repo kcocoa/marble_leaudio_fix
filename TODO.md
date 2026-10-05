@@ -415,3 +415,18 @@ $NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ \
 2. 若无 → 触发侧（LE 设备连接状态上报）问题：考虑重启蓝牙栈 / 关掉
    LE_AUDIO_BROADCAST profile / 检查 `mUnicastGroupIdDeactivatedForBroadcastTransition`
 3. 若有 → 回到 `checkOutputsForDevice` 第二处失败，抓 HAL 的 `openOutputStream` 错误
+
+## 2026-10-06 01:30 状态：硬件 Offload 路线已完整逆向并确认不可行
+
+### 结论
+1. **硬件 Offload 是死路**：高通 vendor 库 `btaudio_offload_if.so` 及 `libar-pal.so` 仅实现了 A2DP Offload，LE Audio 会话下 `audio_get_codec_config` 返回空配置 -> `invalid encoder config` -> PAL 拒绝启动音频流并丢弃数据，导致耳机彻底无声。
+2. **软件编码（Host LC3）是唯一可行路线**：
+   - 此前卡顿根因：credit 饥饿（3 credit @ 10Hz 轮询 = 30 SDU/s），已由 shim 的窗口 credit 机制 (`isocred.window`) 解决。
+   - 此前死机根因：48_4 高码率（120B 帧 + 头 = 158B > Max_SDU 155B）导致切包为 155+3B，控制器无法处理 Unframed CIS 切包而崩溃。
+   - 解决方案：切回软件模式，将码率设定为整包不超 155B（例如 48kHz 100B 或 32kHz 80B），彻底避免分包与死机。
+
+### 待办
+- [ ] 恢复 system.prop 为软件模式：`persist.bluetooth.leaudio_offload.disabled=true`，`ro.bluetooth.leaudio_offload.supported=false`
+- [ ] 还原 audio_policy_configuration.xml 中 primary 模块的伪声明（避免与软件模式抢端口）
+- [ ] 设定 LC3 偏好为 48_2 (100 octets) 或 32_2 (80 octets)
+- [ ] 验证软件模式下流畅连续发声
