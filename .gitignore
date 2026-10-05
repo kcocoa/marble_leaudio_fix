@@ -1,0 +1,9 @@
+# 二进制 / 构建产物（可从设备提取或按 README 重新构建）
+*.so
+*.o
+*.zip
+bluetooth_hci_shim/android.hardware.bluetooth@*
+
+# 监测原始数据体积大；只保留 summary.txt / events.txt / samples.csv
+monitor_runs/*/logcat.txt
+monitor_runs/*/snapshots/
