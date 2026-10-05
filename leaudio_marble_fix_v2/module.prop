@@ -1,0 +1,6 @@
+id=leaudio_marble_fix
+name=LE Audio Enabler for Redmi Note 12 Turbo (marble)
+version=v2.0-shim
+versionCode=2
+author=owner
+description=Enables LE Audio unicast client, software LC3 routing, and upgrades Bluetooth HCI HAL to HIDL 1.1 with sendIsoData support.
