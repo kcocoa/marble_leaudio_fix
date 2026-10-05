@@ -5,11 +5,17 @@ bluetooth.profile.hap.client.enabled=true
 bluetooth.profile.mcp.server.enabled=true
 bluetooth.profile.vcp.controller.enabled=true
 
-# LE Audio 走硬件 offload（控制器侧 LC3 编码），不再用主机（软件）路径。
-# 原因：软件路径在本固件上不可行 —— QTI 的 UART/daemon 传输不支持 HCI ISO 包，
-# 第一个 ISO 包发出后约 90ms 控制器即停止响应，随后
-#   CheckForUartFailureCode: UART driver returns err code = 0x51
-#   -> Hardware Error 0x0F -> SSR -> HAL 死亡 -> 栈 abort（"没声音 + 3-4 秒蓝牙重启"）
-# offload 能力文件见 vendor/etc/le_audio_codec_capabilities.xml（原厂缺失）。
-persist.bluetooth.leaudio_offload.disabled=false
-ro.bluetooth.leaudio_offload.supported=true
+# LE Audio 软件编码（Host LC3）路径配置
+# 高通专有库（btaudio_offload_if.so + libar-pal.so）未实现 LE Audio 硬件 Offload，因此关闭 Offload，走软件模式
+persist.bluetooth.leaudio_offload.disabled=true
+ro.bluetooth.leaudio_offload.supported=false
+
+# BluetoothHciHook shim 配置：
+# 1. patchring: 运行时修复 QTI 环形缓冲区拒绝 ISO 包（type 5）的 bug
+persist.vendor.leaudio.iso.patchring=1
+# 2. ncpsynth: 开启 NCP 凭据合成，解决 QTI HAL 吞掉控制器完成事件导致的 credit 饥饿
+persist.vendor.leaudio.ncpsynth=1
+# 3. isocred.window: 动态信用窗口大小（维持协议栈持续供流）
+persist.vendor.leaudio.isocred.window=12
+# 4. iso.strip4: 剥离 Fluoride 多余的 4 字节 SDU 头，防止超长切片
+persist.vendor.leaudio.iso.strip4=1
