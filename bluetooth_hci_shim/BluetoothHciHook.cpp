@@ -303,6 +303,67 @@ static bool PatchRingBufferIsoType() {
     mprotect(page, (size_t)pg, PROT_READ);
     LOGI("ring-patch: ISO(type5) table entry %u -> %u at %p (base %p)", before, *entry,
          (void*)entry, info.dli_fbase);
+
+    // -----------------------------------------------------------------------
+    // v3.12 RX patch: fix QTI HAL's rejection of incoming HCI ISO packets (type 5).
+    //
+    // Root cause of SSR panic at stream start:
+    // When the Bluetooth controller chip sends an ISO packet on UART RX (e.g. for
+    // CIS status / mic audio / data path ready), UartController::OnDataReady tests
+    // the H4 packet indicator byte against a hardcoded bitmask (0x0012501e).
+    // Bit 5 is 0! So the HAL logs:
+    //   "OnDataReady: Invalid packet type rcvd 0x5"
+    //   "OnDataReady: Out Of Synchronization"
+    //   "SsrCleanup: SSR triggered due to 10 sending special buffer"
+    // -> HAL panics and kills the chip via SSR!
+    //
+    // We patch:
+    // 1. UartController::OnDataReady insn at 0x503d8:
+    //    0x528a03c9 (mov w9, #0x501e) -> 0x528a07c9 (mov w9, #0x503e, bit 5 set!)
+    // 2. HciPacketizer header size table at 0x2f560:
+    //    0 -> 4 (4-byte ISO header)
+    // 3. HciPacketizer jump table at 0x2dd52:
+    //    34 -> 30 (ACL parsing rule: 16-bit payload length at offset 2)
+    // -----------------------------------------------------------------------
+    uint32_t* rx_mask_insn = (uint32_t*)((uintptr_t)info.dli_fbase + 0x503d8);
+    void* rx_page1 = (void*)((uintptr_t)rx_mask_insn & ~(uintptr_t)(pg - 1));
+    if (mprotect(rx_page1, (size_t)pg, PROT_READ | PROT_WRITE) == 0) {
+        if (*rx_mask_insn == 0x528a03c9) {
+            *rx_mask_insn = 0x528a07c9;
+            __builtin___clear_cache((char*)rx_mask_insn, (char*)rx_mask_insn + 4);
+            LOGI("rx-patch: patched valid packet type mask at %p (0x501e -> 0x503e)", rx_mask_insn);
+        }
+        mprotect(rx_page1, (size_t)pg, PROT_READ | PROT_EXEC);
+    } else {
+        LOGE("rx-patch: mprotect rx_page1 failed: %s", strerror(errno));
+    }
+
+    uint64_t* rx_hdr_size = (uint64_t*)((uintptr_t)info.dli_fbase + 0x2f560);
+    void* rx_page2 = (void*)((uintptr_t)rx_hdr_size & ~(uintptr_t)(pg - 1));
+    if (mprotect(rx_page2, (size_t)pg, PROT_READ | PROT_WRITE) == 0) {
+        if (*rx_hdr_size == 0) {
+            *rx_hdr_size = 4;
+            __builtin___clear_cache((char*)rx_hdr_size, (char*)rx_hdr_size + 8);
+            LOGI("rx-patch: patched HciPacketizer header size at %p (0 -> 4)", rx_hdr_size);
+        }
+        mprotect(rx_page2, (size_t)pg, PROT_READ);
+    } else {
+        LOGE("rx-patch: mprotect rx_page2 failed: %s", strerror(errno));
+    }
+
+    uint8_t* rx_jump_entry = (uint8_t*)((uintptr_t)info.dli_fbase + 0x2dd52);
+    void* rx_page3 = (void*)((uintptr_t)rx_jump_entry & ~(uintptr_t)(pg - 1));
+    if (mprotect(rx_page3, (size_t)pg, PROT_READ | PROT_WRITE) == 0) {
+        if (*rx_jump_entry == 34) {
+            *rx_jump_entry = 30;
+            __builtin___clear_cache((char*)rx_jump_entry, (char*)rx_jump_entry + 1);
+            LOGI("rx-patch: patched HciPacketizer jump table at %p (34 -> 30)", rx_jump_entry);
+        }
+        mprotect(rx_page3, (size_t)pg, PROT_READ);
+    } else {
+        LOGE("rx-patch: mprotect rx_page3 failed: %s", strerror(errno));
+    }
+
     return before != kAclEntry;
 }
 
@@ -963,9 +1024,9 @@ int32_t HandleSendIsoData(const ::android::hardware::Parcel& data,
         const uint8_t* p = (const uint8_t*)buf;
         if (IsoStrip4Enabled() && p != nullptr && vec->mSize >= 8) {
             uint32_t hf = (uint32_t)p[0] | ((uint32_t)p[1] << 8);
-            uint32_t pb = (hf >> 12) & 0x3;   // 0=first frag, 3=complete SDU
+            uint32_t pb = (hf >> 12) & 0x3;   // 0=first frag, 2=complete SDU, 3=last frag
             uint32_t l = (uint32_t)p[2] | ((uint32_t)p[3] << 8);
-            if ((pb == 0 || pb == 3) && l >= 8 && (uint64_t)l + 4 == vec->mSize) {
+            if ((pb == 0 || pb == 2 || pb == 3) && l >= 8 && (uint64_t)l + 4 == vec->mSize) {
                 uint32_t newlen = l - 4;
                 memcpy(stripBuf, p, 4);
                 stripBuf[2] = (uint8_t)(newlen & 0xFF);
@@ -1222,7 +1283,7 @@ void* HIDL_FETCH_IBluetoothHci(const char* name) {
 // Constructor: runs at dlopen() inside the HAL service process
 // ---------------------------------------------------------------------------
 __attribute__((constructor)) static void ShimInit() {
-    LOGI("BluetoothHciHook v3.11 init (ring ISO patch + PB-based framed-SDU header strip + live credit window)");
+    LOGI("BluetoothHciHook v3.12 init (ring ISO patch + RX UART/packetizer ISO patch + live credit window)");
     ResolveSymbols();
     RegisterBnConstructorHooks();
 }
