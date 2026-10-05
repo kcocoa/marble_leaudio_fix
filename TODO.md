@@ -430,3 +430,25 @@ $NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ \
 - [ ] 还原 audio_policy_configuration.xml 中 primary 模块的伪声明（避免与软件模式抢端口）
 - [ ] 设定 LC3 偏好为 48_2 (100 octets) 或 32_2 (80 octets)
 - [ ] 验证软件模式下流畅连续发声
+
+## 2026-10-06 02:00 突破：查明软件模式 2 秒崩溃的真正元凶并完成 v3.12 修复
+
+### 根因确诊（非控制器固件崩溃，而是高通用户态 HAL 主动触发 SSR）
+分析动态日志（`01:49:46.871`）：
+```text
+vendor.qti.bluetooth@1.0-uart_controller: OnDataReady: Invalid packet type rcvd 0x5, invalid_bytes_counter_ = 0
+vendor.qti.bluetooth@1.0-uart_controller: OnDataReady: Invalid packet type rcvd 0x6, invalid_bytes_counter_ = 1
+vendor.qti.bluetooth@1.0-uart_controller: OnDataReady: Out Of Synchronization
+vendor.qti.bluetooth@1.0-uart_controller: SsrCleanup: SSR triggered due to 10 sending special buffer
+```
+反汇编 `libbluetooth_qti_real.so` 中的 `UartController::OnDataReady`（`0x503d4`）：
+- 原厂指令：`mov w9, #0x501e; movk w9, #0x12, lsl #16`，即校验掩码为 `0x0012501e`。
+- 逐 bit 展开发现：掩码包含了 Type 1 (CMD)、2 (ACL)、3 (SCO)、4 (EVT)，**但唯独漏掉了 Type 5 (ISO) 的 bit 5（0x20）**！
+- 当耳机或芯片通过 UART RX 上传 ISO 数据（麦克风或控制流）时，第一字节 `0x05` 命中掩码失败，第二字节（handle）再次失败，HAL 误以为 UART 严重失步，**主动调用 `SsrCleanup` 发送崩溃包强制拉低芯片并重启**！
+
+### v3.12 修复（TX + RX 全双工打通）
+1. `0x503d8` 指令补丁：`mov w9, #0x503e`（将 bit 5 设为 1，将 Type 5 声明为合法 H4 封包）。
+2. `0x2f560` 头大小表补丁：Type 5 头大小由 `0` 改为 `4`（2B Handle + 2B Length）。
+3. `0x2dd52` 跳转表补丁：Type 5 跳转偏移由 `34` 改为 `30`（复用 ACL 的 16-bit 载荷长度解析逻辑）。
+4. 修复 W^X 保护：严格分离 `PROT_READ|PROT_WRITE` 与 `PROT_READ|PROT_EXEC`，消除 SELinux `execmem` 拦截。
+5. 修复 `audio_set_configurations.json`：修正 155 octets 配置为 100 octets，防止帧切片。
