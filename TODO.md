@@ -452,3 +452,49 @@ vendor.qti.bluetooth@1.0-uart_controller: SsrCleanup: SSR triggered due to 10 se
 3. `0x2dd52` 跳转表补丁：Type 5 跳转偏移由 `34` 改为 `30`（复用 ACL 的 16-bit 载荷长度解析逻辑）。
 4. 修复 W^X 保护：严格分离 `PROT_READ|PROT_WRITE` 与 `PROT_READ|PROT_EXEC`，消除 SELinux `execmem` 拦截。
 5. 修复 `audio_set_configurations.json`：修正 155 octets 配置为 100 octets，防止帧切片。
+
+## 2026-10-06 03:20 ISO RX 蹦床 v2：补上遗漏的 `mov x8, sp`
+
+### 崩溃现象
+HAL 进程 SIGSEGV（write fault @ 0x64540），栈：
+```
+#00 BpHwBluetoothHciCallbacks::scoDataReceived(const hidl_vec&)+24
+#01 libbluetooth_qti_real.so 0x3be08 (蹦床的 blr x9)
+    <- DataHandler::OnPacketReady <- HciPacketizer::OnDataReady
+```
+
+### 根因
+HIDL 生成的代理方法（`initializationComplete/hciEventReceived/aclDataReceived/
+scoDataReceived` @ iface 库 0x1a5c0-0x1a64c）形如：
+```asm
+movi v0.2d, #0 ; add x0, x0, #8 ; add x1, x9, #0x30
+str  xzr, [x8, #0x20]        ; <-- 需要 x8 = Return<void> 的 sret 槽
+stp  q0, q0, [x8]
+b    _hidl_xxx@plt
+```
+原厂 ACL 路径在调用前有 `mov x8, sp`（0x3bd28: `910003e8`），
+v1 蹦床漏了它，x8 是野值 -> `str xzr,[x8+0x20]` 写 0x64540 崩溃。
+
+### v2 蹦床（9 条指令，恰好填满 0x24 字节）
+把 x20 直接装进 x0（省一个槽位）腾出空间给 `mov x8, sp`：
+```asm
+cmp  w21, #0x5          ; 仅处理 HCI ISO 包
+b.ne 0x3be10            ; 其他类型：静默丢弃（同原厂行为）
+ldr  x0, [x20, #0x10]   ; 回调包装器
+ldr  x21, [x0]          ; vtable
+ldr  x9, [x21, #0x80]   ; scoDataReceived（厂商分发从不调用此槽）
+mov  x1, x19            ; const hidl_vec&
+mov  x8, sp             ; Return<void> sret —— 关键修复
+blr  x9
+b    0x3be10
+```
+
+### vtable 偏移实证（tombstone 确认）
+- EVT(0x70)=hciEventReceived、ACL(0x78)=aclDataReceived、
+  **0x80=scoDataReceived**（v1 蹦床确实调到了 scoDataReceived，槽位判断正确）
+- 后续由 shim 的 HookedBinderTransact 把 code 4 交易改写为
+  `@1.1::IBluetoothHciCallbacks` + code 5 (isoDataReceived)
+
+### 操作教训
+不再手动 `mount -o bind` 覆盖 /vendor，只维护模块目录文件，
+由 KernelSU 开机 magic mount（只读）统一生效。
