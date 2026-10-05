@@ -272,3 +272,31 @@ I BTAudioProviderFactoryAIDL: SessionType=LE_AUDIO_HARDWARE_OFFLOAD_ENCODING_DAT
      （`le_audio_codec_capabilities.xml` 就是这样才生效的）。
    * 临时 bind mount 覆盖 `/vendor/etc/audio/sku_ukee/audio_policy_configuration.xml`
      对默认命名空间可见（非 root shell 也能读到），但同样需要 audioserver 重载才生效。
+
+### 突破：音频路由成功切入 LE Audio 耳机（2026-10-06 01:10）
+
+经过对 Android 音频栈与蓝牙栈的源码反汇编与动态追踪，成功定位并解决导致路由切不过去的两大核心阻塞点：
+
+1. **`audio.bluetooth.default.so` 的 SessionType 硬编码失配**：
+   - 蓝牙栈开启硬件 Offload 后注册 Session 6 (`HARDWARE_OFFLOAD_ENCODING`) 与 Session 7 (`HARDWARE_OFFLOAD_DECODING`)。
+   - 原厂 AOSP `audio.bluetooth.default.so` 的 `BluetoothAudioPortAidl::init_session_type` 将 `0x20000000` (BLE 耳机) 硬编码映射到 Session 4 (`SOFTWARE_ENCODING`)。
+   - 打开音频流时 HAL 去校验 Session 4，返回 `is not ready` -> `openOutputWithProfileAndDevice failed -19`。
+   - **修复**：对 `audio.bluetooth.default.so` 打二进制补丁：
+     * `0x13620`: `mov w8, #4` -> `mov w8, #6` (Session 6)
+     * `0x135e8`: `mov w8, #5` -> `mov w8, #7` (Session 7)
+     * `0x135cc`: `mov w8, #8` -> `mov w8, #9` (Session 9)
+
+2. **`AudioPolicyManager` 硬件 Offload 格式查询机制**：
+   - 源码 `AudioPolicyManager::getHwOffloadFormatsSupportedForBluetoothMedia` 显示：系统查询 LE Audio 硬件 Offload 格式时，**硬编码只遍历 `primary` 模块的 `declaredDevices`**。
+   - 此前 BLE 端口仅声明在独立的 `bluetooth` 模块中，导致：
+     `AudioManager.getHwOffloadFormatsSupportedForLeAudio()` 返回空列表 (size=0) ->
+     `LeAudioCodecConfig: mCodecConfigOffloading size for le -> 0` ->
+     蓝牙栈 `codec_manager` 将 `offload_preference_set` 置空 ->
+     `Offload configs for MEDIA: {empty}` -> 无法协商出有效 offload 参数 -> 起流时返回 `status=FAILURE`。
+   - **修复**：在 `<module name="primary">` 内部补充声明 `BLE Headset Out` 等设备端口，并标记 `encodedFormats="AUDIO_FORMAT_LC3"` 与对应路由。
+
+3. **最终实测验证结果**：
+   - `LeAudioCodecConfig: mCodecConfigOffloading size for le -> 1 (LC3)`
+   - `dumpsys audio`: `Devices: ble_headset(20000000)`
+   - `dumpsys media.audio_flinger`: `Patch 52 ... first device type 20000000`
+   - 播放状态：歌曲正常播放并自动切歌（Track 3 -> Track 4），**无掉线、无卡死、无芯片 SSR 崩溃**！
