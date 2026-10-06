@@ -163,8 +163,13 @@ adb -s $SER shell lshal list -i | grep IBluetoothHci
 adb -s $SER shell 'vintf dm | grep -A3 android.hardware.bluetooth'
 # SELinux
 adb -s $SER shell 'ls -Z /vendor/lib64/hw/ | grep -i "impl-qti\|bluetooth"'
-# 控制器 ISO 缓冲数：播放时 isoproxy 统计行 inflight=x/N 中的 N（00680 固件应为 22）
-adb -s $SER logcat -d | grep "isoproxy: enq=" | tail -1
+# 控制器 ISO 缓冲数（00680 固件应为 22）：从 btsnoop 里 LE Read Buffer Size v2 的返回读
+# snoop 日志在 /data/misc/bluetooth/logs/btsnoop_hci.log（需 persist.bluetooth.btsnooplogmode=full）
+adb -s $SER shell su -c 'cat /data/misc/bluetooth/logs/btsnoop_hci.log' > /tmp/bt.snoop
+tshark -r /tmp/bt.snoop -Y "bthci_evt.total_num_iso_data_pkts > 0" \
+  -T fields -e bthci_evt.total_num_iso_data_pkts -e bthci_evt.iso_data_pkt_len
+# 丢包：协议栈自己的日志（v4.4 删掉 credit 代理后，没有 shim 侧的统计行了）
+adb -s $SER logcat -d | grep "dropping ISO"
 ```
 
 ---

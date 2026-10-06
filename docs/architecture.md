@@ -147,9 +147,7 @@ $T/clang++ --target=aarch64-linux-android24 -shared -fPIC -O2 -std=c++17 -Ibuild
 
 | 属性 | 默认 | 读取 | 作用 |
 |---|---|---|---|
-| `isoproxy` | 1 | 缓存 | v4.0 credit 代理：ISO 包排队，在飞 ≤ 控制器缓冲数（从 `LE Read Buffer Size v2`（`0x2060`）的返回值读取：00570 为 3，00680 为 22），用真实 NCP 回补栈 credit。0 = 直发 |
-| `isoproxy.qmax` | 4 | 缓存 | 每 handle 队列上限，满了丢最旧（限制延迟） |
-| `cig.maxlat` | 10 | 实时 | v4.1 把 `0x2062` 的 Max_Transport_Latency 截到 N ms（0=关）。00570 下不截时 MEDIA 配置会让控制器选 40ms/BN=4 → 只剩 38 包/s（00680 下未重新评估） |
+| `cig.maxlat` | 10 | 实时 | v4.1 把 `0x2062` 的 Max_Transport_Latency 截到 N ms（0=关）。不截时控制器选 `ISO_Interval=40ms`、传输延迟 84.57ms，流建立瞬间丢 6–8 包；截到 10ms → 10ms / 7.21ms、零丢包。**仍然必要** |
 | `cig.maxrtn` | -1（关） | 实时 | 截 RTN（每 CIS 的 rtn 字段）。实测缩短 CIG 事件对吞吐无帮助，只会降低空口可靠性，保持关闭 |
 | `ncpsynth` | **0** | 缓存 | 合成 NCP。**必须为 0**：合成 credit 会让栈超出控制器缓冲数发包 → 控制器挂死（root-causes 第 9 节） |
 | `iso.strip4` | **0** | 缓存 | 剥掉 HCI ISO 头里的 `Packet_Sequence_Number`+`ISO_SDU_Length`。**必须为 0**：那是规范强制字段（root-causes 第 8 节更正）。v4.0 起属性缺失时默认 0 |
@@ -157,7 +155,17 @@ $T/clang++ --target=aarch64-linux-android24 -shared -fPIC -O2 -std=c++17 -Ibuild
 | `iso.patchring` | 1 | 缓存 | ring buffer type-5 补丁 |
 | `isocred.mult` | 1 | 实时 | 早期乘法式 NCP —— **已知会下溢，勿用**；v4.0 起默认 1（关） |
 
-其中 `isoproxy` 与 `cig.maxlat` 是否仍需要未验证，见仓库根目录 `TODO.md`。
+`cig.maxlat=10` 的实测依据（00680 固件 + 已打补丁的 HAL，数据取自 btsnoop 里的 `LE CIS Established` 事件）：
+
+- **不截**：控制器选 `ISO_Interval=40ms`、`Transport Latency=84570µs`，in-flight 打满 22/22，
+  流建立瞬间丢 6–8 包（`btm_iso_impl.h:562 … iso credits: 0`）；原因是长 ISO 间隔下首包到第一个 NCP
+  之间 credit 恒为 0。
+- **截到 10ms**：`10ms` / `7210µs`、in-flight 8/22、零丢包。
+
+> v4.0 的 ISO credit 代理（`isoproxy`、`isoproxy.qmax`）已在 v4.4 **删除**。它是为原厂 00570
+> （3 个 ISO 缓冲）设计的，而模块自带 00680 固件（22 个缓冲），协议栈自身的 credit 记账已经够用：
+> 删除前后 CIS 参数完全相同（10ms / 7210µs）、连续播放零丢包、NCP 逐包回报且 handle 正确。
+> 删除后控制器缓冲数改用 btsnoop 读（见 `operations.md`）。
 
 ## 5. AArch64 / HIDL ABI 硬知识
 

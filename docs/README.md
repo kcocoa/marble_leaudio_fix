@@ -30,7 +30,6 @@ module/
     │   ├── libbluetooth_qti_real.so                      原厂 impl-qti.so 改 SONAME，4 处补丁
     │   └── audio.bluetooth.default.so                    原厂音频 HAL，2 处补丁
     └── etc/
-        ├── le_audio_codec_capabilities.xml               手写（AOSP schema）
         ├── vintf/manifest_ukee.xml                       声明 IBluetoothHci @1.1（基于设备导出件修改，不入库）
         └── audio/sku_ukee/audio_policy_configuration.xml 补全 bluetooth 模块（基于设备导出件修改，不入库）
 ```

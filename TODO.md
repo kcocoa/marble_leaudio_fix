@@ -1,15 +1,23 @@
 # TODO
 
-尚未验证或未完成的事项。已确认的结论见 [`docs/`](docs/README.md)。
+尚未决定或未验证的事项。已确认的结论见 [`docs/`](docs/README.md)。
+
+## 待决定
+
+1. **其余默认关闭的实验开关是否也删掉**：`ncpsynth`（必须为 0）、`isocred.mult`（会下溢，勿用）、
+   `isocred.window`（只在 `ncpsynth=1` 时有意义）、`iso.strip4`（必须为 0）都是 00570 时期的实验开关，
+   默认值下对应的代码路径永远不会走到 —— 与已删除的 `isoproxy` 同理，属于"不必要的实体"。
+   删除它们不改变任何默认行为（纯死代码），但会让 shim 再小一截。
 
 ## 待验证
 
-1. **shim 运行时开关是否还需要**（[`docs/architecture.md` §4](docs/architecture.md)）
-   - `isoproxy`（credit 代理）：当年为 3 缓冲固件设计，00680 有 22 个缓冲，可能已经多余。
-   - `cig.maxlat=10`：理由来自 00570（不截时控制器会选 40ms/BN=4）。
-   - 验证方法：改 prop 后重启蓝牙 HAL（`stop` / `start vendor.bluetooth-1-0-qti`，**不用重启设备**），
-     观察播放是否仍正常、`isoproxy` 的 `drop` 与 `inflight` 是否正常。
-2. **`module/vendor/etc/le_audio_codec_capabilities.xml`**：原厂没有这个文件，是手写的；
-   关掉 offload 后是否仍被读取，未验证。
-3. **录音与通话路径**：删掉 `resourcemanager_ukee_mtp.xml` 覆盖后，重启无报错、音乐播放正常，
-   但录音与通话未测。
+2. **耳机麦克风 / 通话路径**：删除 `resourcemanager_ukee_mtp.xml` 覆盖后，播放音乐时 source ASE 保持
+   IDLE（符合预期，耳机麦克风不再陪跑）；普通录音走手机自带麦克风（`BLE Headset In` 未被打开，
+   符合 Android 行为）。耳机麦克风只在通话场景（`VOICE_COMMUNICATION`）启用，
+   需要一次真实通话才能验证。
+
+## 部署注意
+
+3. 已从仓库删除 `module/vendor/etc/le_audio_codec_capabilities.xml`（原厂镜像里没有这个文件，
+   实测在关闭 offload 的配置下也不被读取）。设备上的那份要**下次重启**才会从 `/vendor` 消失，
+   在此之前它只是躺着不生效。

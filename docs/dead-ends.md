@@ -27,6 +27,9 @@
 
 **最终路由成功切入** `ble_headset(20000000)`，`dumpsys media.audio_flinger` 显示
 `Patch 52 ... first device type 20000000`，歌曲自动切歌（Track 3 → Track 4），无掉线无 SSR。
+
+> 后续：这条路最终放弃（改用软件编码，见 `root-causes.md`）；上表补的
+> `le_audio_codec_capabilities.xml` 也随之从模块中删除 —— 关闭 offload 后它不再被读取。
 看起来完全成功了 —— **然后耳机一点声音都没有。**
 
 ### 真正的死穴
@@ -115,7 +118,7 @@ credit 总数 = 控制器报告的缓冲数（`LE Read Buffer Size v2`，opcode 
 - 控制器的真实 NCP 会 1:1 传到协议栈，HAL 并没有吞掉
 - 伪造 NCP 等于让协议栈往只有 3 个缓冲的控制器里硬塞包，必然挂死（root-causes 第 9 节）
 
-**现状**：`ncpsynth=0`，不再伪造 NCP；shim 改为只按真实 NCP 放行（`isoproxy`）。
+**现状**：`ncpsynth=0`，不再伪造 NCP；shim 直发 ISO（v4.4 起连 credit 代理也一并删除）。
 缓冲不足的问题最终靠换固件 00680（22 个缓冲）解决，不是靠主机侧算法。
 
 **教训**：先测出下游的真实容量，再设计上游算法。
@@ -173,6 +176,9 @@ credit 总数 = 控制器报告的缓冲数（`LE Read Buffer Size v2`，opcode 
 去掉录音元数据后栈选 `48_4_High_Reliability`（maxlat 100ms）→ 控制器选 ISO_Interval=40ms、
 BN=4、FT=2 → 双耳每间隔需 8 缓冲 → **38/s**（比 LIVE 还糟）。v4.1 截 maxlat=10ms 恢复
 10ms/BN=1。教训：**场景与 qos 目标一起决定控制器调度；换场景后必须重测**。
+
+00680（22 缓冲）上重新验证过，结论相同：不加截断仍是 `ISO_Interval=40ms`、传输延迟 84.57ms，
+流建立瞬间丢 6–8 包；截到 10ms 后为 10ms / 7.21ms、零丢包。这条不是 00570 专有现象。
 
 ### 7.4 改函数入口不能碰 paciasp
 

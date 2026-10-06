@@ -396,9 +396,9 @@ HCI ISO 数据包里 handle/长度之后的 `[2B 序号][2B 长度]` 是 HCI 规
 8. on_hci_timeout READ_CLOCK(0x1407) + UART err 0x51 + SSR，且起流后 ~2s 发生 ?
    └─ 查 persist.vendor.leaudio.ncpsynth 是否为 0（根因 9）；strip4 也应为 0（根因 8）
 
-9. 不崩但卡顿 / 丢包 → 看 isoproxy 统计行 inflight=x/N：
-   └─ N=3 → 仍在用原厂 00570 固件，固件 bind mount 没生效（根因 12、13）
-   └─ N=22 但 drop>0 → 新问题，抓 btsnoop 分析
+9. 不崩但卡顿 / 丢包 → 先看协议栈有没有 `dropping ISO`（`iso credits: 0`）：
+   └─ 有 → credit 被打光：确认固件是 00680（`0x2060` 应返回 22 个缓冲，根因 12、13）
+   └─ 无但仍有异常 → 抓 btsnoop 分析
 
 10. 以上全无 + 链路全通 + AudioFlinger 在写 → 真正需要人耳验证
 ```
@@ -453,7 +453,8 @@ hold(send->NCP) avg=19880us max=24936us n=750, send call avg=128us
 
 **实测结果（MEDIA 48_4 High Reliability）**：
 - 芯片 `0x2060 (LE Read Buffer Size v2)` 真实返回：**22 个 ISO 缓冲区**（原厂为 3 个）！
-- 双耳同时 STREAMING 40+ 秒持续统计：
+- 双耳同时 STREAMING 40+ 秒持续统计（这行来自 v4.0 的 credit 代理，v4.4 已删除；
+  `inflight=11/22` 说明当时的控制器缓冲数是 22）：
   ```
   isoproxy: enq=8008 sent=8007 drop=0 ncp=7996 acked=8006 inflight=11/22 maxq=1
   ```
