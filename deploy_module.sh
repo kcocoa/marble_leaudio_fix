@@ -25,7 +25,6 @@ FILES=(
   vendor/lib64/hw/android.hardware.bluetooth@1.0-impl-qti.so
   vendor/lib64/hw/libbluetooth_qti_real.so
   vendor/lib64/hw/audio.bluetooth.default.so
-  vendor/etc/le_audio_codec_capabilities.xml
   vendor/etc/vintf/manifest_ukee.xml
   vendor/etc/audio/sku_ukee/audio_policy_configuration.xml
 )

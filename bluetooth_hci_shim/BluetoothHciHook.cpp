@@ -524,9 +524,6 @@ static bool MultiplyNcpInBuffer(uint8_t* b, size_t size) {
     return modified;
 }
 
-namespace isoproxy { void OnEvent(uint8_t* eb, size_t bsz); }
-static bool IsoProxyEnabled();
-
 int32_t HookedBinderTransact(void* thiz, uint32_t code,
                              const ::android::hardware::Parcel* data,
                              ::android::hardware::Parcel* reply,
@@ -584,7 +581,6 @@ int32_t HookedBinderTransact(void* thiz, uint32_t code,
                 if ((((uintptr_t)ptr) >> 48) != 0xb400) continue;  // heap pattern guard
                 const uint8_t* eb = (const uint8_t*)(uintptr_t)ptr;
                 if (bsz >= 1) sEvtCodeHist[eb[0]]++;
-                if (IsoProxyEnabled()) isoproxy::OnEvent((uint8_t*)eb, (size_t)bsz);
                 // v3.3g: opcode histogram for Command Complete (0x0e):
                 // [0]=0x0e [1]=plen [2]=num_cmd [3..4]=opcode LE
                 if (bsz >= 5 && eb[0] == 0x0e) {
@@ -1017,281 +1013,6 @@ static bool IsoStrip4Enabled() {
     return sV == 1;
 }
 
-// ---------------------------------------------------------------------------
-// v4.0 ISO credit proxy.
-//
-// Measured (btsnoop, stock firmware 00570): the controller has only 3 ISO buffers
-// (LE Read Buffer Size v2) and returns real NCPs 1:1, ~8 ms after the CIS
-// anchor. The stack sends both CIS packets together every 10 ms and DROPS
-// when it has no credit, so with 2 CIS it is stuck at 2,1,2,1... = 150/s
-// (25% loss) no matter how fast the controller is.
-//
-// Proxy: sendIsoData only queues the packet (per handle, drop-oldest).
-// A sender thread forwards queued packets while in-flight < controller
-// buffers. Each real NCP frees controller slots (wakes the sender, so the
-// next packet goes out right after the CIS event, i.e. well before the next
-// anchor) and its ISO counts are rewritten to the number of packets the
-// stack has handed us on that handle and not yet had acknowledged. That
-// never exceeds what the stack sent per handle (no used_credits underflow)
-// and never puts more than the real buffer count into the controller.
-// Switch: persist.vendor.leaudio.isoproxy (default 1; 0 = direct send).
-// ---------------------------------------------------------------------------
-static bool IsoProxyEnabled() {
-    static int sV = -1;
-    if (sV < 0) {
-        char v[PROP_VALUE_MAX] = {0};
-        sV = (__system_property_get("persist.vendor.leaudio.isoproxy", v) > 0 &&
-              v[0] == '0') ? 0 : 1;
-    }
-    return sV == 1;
-}
-
-static int IsoProxyQmax() {
-    static int sV = -1;
-    if (sV < 0) {
-        char v[PROP_VALUE_MAX] = {0};
-        sV = 4;
-        if (__system_property_get("persist.vendor.leaudio.isoproxy.qmax", v) > 0) {
-            int t = atoi(v);
-            if (t >= 1 && t <= 8) sV = t;
-        }
-    }
-    return sV;
-}
-
-namespace isoproxy {
-constexpr int kMaxHandles = 4;
-constexpr int kQCap = 8;
-constexpr uint32_t kPktMax = 1024;
-struct Pkt { uint32_t len; uint64_t seq; uint8_t data[kPktMax]; };
-struct HQ {
-    bool used;
-    uint16_t handle;
-    int head, count;
-    uint32_t inflight;   // sent to controller, no NCP yet
-    uint32_t stackOut;   // received from stack, not yet acked to the stack
-    Pkt q[kQCap];
-    int64_t sentUs[8];   // send timestamps of in-flight packets (FIFO)
-    int sentHead;
-};
-HQ gQ[kMaxHandles];
-pthread_mutex_t gMu = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t gCv = PTHREAD_COND_INITIALIZER;
-bool gStarted = false;
-uint32_t gCtrlBufs = 3;
-uint32_t gInflight = 0;
-uint64_t gSeq = 0;
-int64_t gLastNcpMs = 0, gLastSendMs = 0, gLastStatMs = 0;
-uint32_t gEnq = 0, gSent = 0, gDrop = 0, gNcp = 0, gAcked = 0, gMaxDepth = 0, gWatchdog = 0;
-uint8_t gTxBuf[kPktMax];
-int64_t gHoldSumUs = 0, gHoldMaxUs = 0, gCallSumUs = 0;
-uint32_t gHoldN = 0;
-int64_t NowUs() {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
-}
-
-int64_t NowMs() {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-}
-
-// caller holds gMu
-HQ* GetQ(uint16_t h, bool create) {
-    for (auto& q : gQ)
-        if (q.used && q.handle == h) return &q;
-    if (!create) return nullptr;
-    for (auto& q : gQ) {
-        if (!q.used || (q.count == 0 && q.inflight == 0 && q.stackOut == 0)) {
-            q.used = true; q.handle = h; q.head = 0; q.count = 0;
-            q.inflight = 0; q.stackOut = 0;
-            return &q;
-        }
-    }
-    return nullptr;
-}
-
-// caller holds gMu
-void ResetAll(const char* why) {
-    for (auto& q : gQ) {
-        q.used = false; q.count = 0; q.inflight = 0; q.stackOut = 0;
-    }
-    gInflight = 0;
-    LOGI("isoproxy: reset (%s)", why);
-}
-
-void* SenderThread(void*) {
-    pthread_mutex_lock(&gMu);
-    for (;;) {
-        for (;;) {
-            if (gInflight >= gCtrlBufs) break;
-            HQ* best = nullptr;
-            for (auto& q : gQ) {
-                if (!q.used || q.count == 0) continue;
-                if (best == nullptr || q.q[q.head].seq < best->q[best->head].seq) best = &q;
-            }
-            if (best == nullptr) break;
-            Pkt& p = best->q[best->head];
-            uint32_t len = p.len;
-            memcpy(gTxBuf, p.data, len);
-            best->head = (best->head + 1) % kQCap;
-            best->count--;
-            int64_t t0 = NowUs();
-            best->sentUs[(best->sentHead + best->inflight) & 7] = t0;
-            best->inflight++;
-            gInflight++;
-            pthread_mutex_unlock(&gMu);
-            HidlVec v;
-            v.mBuffer = gTxBuf; v.mSize = len; v.mOwnsBuffer = false;
-            v.mPad[0] = v.mPad[1] = v.mPad[2] = 0;
-            gSendDataToController(gStockHci, 5 /* ISO */, &v);
-            int64_t t1 = NowUs();
-            pthread_mutex_lock(&gMu);
-            gCallSumUs += t1 - t0;
-            gSent++;
-            gLastSendMs = NowMs();
-        }
-        struct timespec dl;
-        clock_gettime(CLOCK_REALTIME, &dl);
-        dl.tv_nsec += 100 * 1000000;
-        if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; }
-        pthread_cond_timedwait(&gCv, &gMu, &dl);
-        int64_t now = NowMs();
-        // A lost NCP would stall the pipe forever; per spec unacked ISO data is
-        // flushed after FT anyway, so after 1 s of silence assume it is gone.
-        if (gInflight > 0 && now - gLastNcpMs > 1000 && now - gLastSendMs > 1000) {
-            gWatchdog++;
-            for (auto& q : gQ) q.inflight = 0;
-            gInflight = 0;
-            LOGW("isoproxy: watchdog, no NCP for 1s -> in-flight cleared (#%u)", gWatchdog);
-        }
-        if (now - gLastStatMs >= 5000 && now - gLastSendMs < 5000) {
-            gLastStatMs = now;
-            LOGI("isoproxy: enq=%u sent=%u drop=%u ncp=%u acked=%u inflight=%u/%u maxq=%u wd=%u "
-                 "hold(send->NCP) avg=%lldus max=%lldus n=%u, send call avg=%lldus",
-                 gEnq, gSent, gDrop, gNcp, gAcked, gInflight, gCtrlBufs, gMaxDepth, gWatchdog,
-                 (long long)(gHoldN ? gHoldSumUs / gHoldN : 0), (long long)gHoldMaxUs, gHoldN,
-                 (long long)(gSent ? gCallSumUs / gSent : 0));
-            gMaxDepth = 0; gHoldSumUs = 0; gHoldMaxUs = 0; gHoldN = 0;
-        }
-    }
-    return nullptr;
-}
-
-// sendIsoData path. Returns false if the packet could not be queued.
-bool Enqueue(const uint8_t* data, uint32_t len) {
-    if (data == nullptr || len < 4 || len > kPktMax) return false;
-    uint16_t h = (uint16_t)(data[0] | (data[1] << 8)) & 0x0FFF;
-    pthread_mutex_lock(&gMu);
-    if (!gStarted) {
-        pthread_t t;
-        if (pthread_create(&t, nullptr, SenderThread, nullptr) == 0) {
-            pthread_detach(t);
-            gStarted = true;
-            LOGI("isoproxy: sender thread started (ctrl bufs %u, qmax %d)", gCtrlBufs,
-                 IsoProxyQmax());
-        } else {
-            pthread_mutex_unlock(&gMu);
-            return false;
-        }
-    }
-    HQ* q = GetQ(h, true);
-    if (q == nullptr) { pthread_mutex_unlock(&gMu); return false; }
-    q->stackOut++;
-    if (q->count >= IsoProxyQmax()) {  // drop oldest: keep latency bounded
-        q->head = (q->head + 1) % kQCap;
-        q->count--;
-        gDrop++;
-    }
-    Pkt& p = q->q[(q->head + q->count) % kQCap];
-    memcpy(p.data, data, len);
-    p.len = len;
-    p.seq = gSeq++;
-    q->count++;
-    gEnq++;
-    if ((uint32_t)q->count > gMaxDepth) gMaxDepth = (uint32_t)q->count;
-    pthread_cond_signal(&gCv);
-    pthread_mutex_unlock(&gMu);
-    return true;
-}
-
-// Event path (outbound hciEventReceived, before it is forwarded to the stack).
-// eb is the heap event buffer and is writable.
-void OnEvent(uint8_t* eb, size_t bsz) {
-    if (eb == nullptr || bsz < 3) return;
-    if (eb[0] == 0x13) {  // Number Of Completed Packets
-        uint32_t n = eb[2];
-        if (3 + 4 * (size_t)n > bsz) return;
-        pthread_mutex_lock(&gMu);
-        bool any = false;
-        for (uint32_t i = 0; i < n; i++) {
-            uint8_t* t = eb + 3 + 4 * i;
-            uint16_t h = (uint16_t)(t[0] | (t[1] << 8)) & 0x0FFF;
-            HQ* q = GetQ(h, false);
-            if (q == nullptr) continue;  // ACL handle: untouched
-            uint32_t cnt = (uint32_t)(t[2] | (t[3] << 8));
-            uint32_t c = cnt < q->inflight ? cnt : q->inflight;
-            int64_t nowUs = NowUs();
-            for (uint32_t k = 0; k < c; k++) {
-                int64_t hd = nowUs - q->sentUs[q->sentHead & 7];
-                q->sentHead = (q->sentHead + 1) & 7;
-                gHoldSumUs += hd; gHoldN++;
-                if (hd > gHoldMaxUs) gHoldMaxUs = hd;
-            }
-            q->inflight -= c;
-            gInflight = gInflight >= c ? gInflight - c : 0;
-            gNcp += cnt;
-            // v4.3: Honest, per-handle credit return without cross-handle swapping.
-            // Swapping handles caused Fluoride's used_credits to underflow to 65535
-            // (0 - 1 = 65535 uint16) whenever an ack was routed to a handle with
-            // no outstanding packets in the stack, dropping that ear completely!
-            // Furthermore, never report more credits than the controller actually freed (cnt),
-            // and never report more credits than the stack actually sent on this handle (q->stackOut).
-            uint32_t rep = cnt;
-            if (rep > q->stackOut) rep = q->stackOut;
-            q->stackOut -= rep;
-            gAcked += rep;
-            t[0] = (uint8_t)(q->handle & 0xFF);
-            t[1] = (uint8_t)((q->handle >> 8) & 0x0F);
-            t[2] = (uint8_t)(rep & 0xFF);
-            t[3] = (uint8_t)(rep >> 8);
-            any = true;
-        }
-        if (any) {
-            gLastNcpMs = NowMs();
-            pthread_cond_signal(&gCv);
-        }
-        pthread_mutex_unlock(&gMu);
-    } else if (eb[0] == 0x05 && bsz >= 6) {  // Disconnection Complete
-        uint16_t h = (uint16_t)(eb[3] | (eb[4] << 8)) & 0x0FFF;
-        pthread_mutex_lock(&gMu);
-        HQ* q = GetQ(h, false);
-        if (q != nullptr) {
-            gInflight = gInflight >= q->inflight ? gInflight - q->inflight : 0;
-            LOGI("isoproxy: handle 0x%x disconnected (queued %d, inflight %u, stackOut %u)",
-                 h, q->count, q->inflight, q->stackOut);
-            q->used = false; q->count = 0; q->inflight = 0; q->stackOut = 0;
-        }
-        pthread_mutex_unlock(&gMu);
-    } else if (eb[0] == 0x0e && bsz >= 6) {  // Command Complete
-        uint16_t opc = (uint16_t)(eb[3] | (eb[4] << 8));
-        if (opc == 0x2060 && bsz >= 12 && eb[5] == 0 && eb[11] > 0) {  // LE Read Buffer Size v2
-            pthread_mutex_lock(&gMu);
-            gCtrlBufs = eb[11];
-            pthread_mutex_unlock(&gMu);
-            LOGI("isoproxy: controller ISO buffers = %u (len %u)", eb[11],
-                 (unsigned)(eb[9] | (eb[10] << 8)));
-        } else if (opc == 0x0c03) {  // HCI Reset
-            pthread_mutex_lock(&gMu);
-            ResetAll("HCI_Reset");
-            pthread_mutex_unlock(&gMu);
-        }
-    }
-}
-}  // namespace isoproxy
-
 int32_t HandleSendIsoData(const ::android::hardware::Parcel& data,
                           ::android::hardware::Parcel* reply) {
     typedef ::android::hardware::Parcel P;
@@ -1359,10 +1080,7 @@ int32_t HandleSendIsoData(const ::android::hardware::Parcel& data,
                          newlen, (unsigned)(p[4] | (p[5] << 8)), (unsigned)(p[6] | (p[7] << 8)));
             }
         }
-        if (!IsoProxyEnabled() ||
-            !isoproxy::Enqueue((const uint8_t*)isoVec.mBuffer, isoVec.mSize)) {
-            gSendDataToController(gStockHci, 5 /* HciPacketType::ISO_DATA */, &isoVec);
-        }
+        gSendDataToController(gStockHci, 5 /* HciPacketType::ISO_DATA */, &isoVec);
     } else {
         LOGE("sendIsoData: controller/impl unresolved, dropping %u bytes", vec->mSize);
         return (int32_t)0x80000001u;
@@ -1696,8 +1414,8 @@ void* HIDL_FETCH_IBluetoothHci(const char* name) {
 // Constructor: runs at dlopen() inside the HAL service process
 // ---------------------------------------------------------------------------
 __attribute__((constructor)) static void ShimInit() {
-    LOGI("BluetoothHciHook v4.3 init (ring ISO patch + ISO RX forwarding + ISO credit proxy=%d, "
-         "CIG max latency cap=%d ms)", IsoProxyEnabled() ? 1 : 0, CigMaxLatencyCap());
+    LOGI("BluetoothHciHook v4.4 init (ring ISO patch + ISO RX forwarding, "
+         "CIG max latency cap=%d ms)", CigMaxLatencyCap());
     ResolveSymbols();
     RegisterBnConstructorHooks();
 }
