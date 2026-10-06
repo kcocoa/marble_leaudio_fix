@@ -91,6 +91,14 @@ bind mount 只保留给 VINTF XML 的零写入预验证（见 operations.md 第 
 
 ## 4. NCP 信用倍增 / 合成 NCP —— 一条走不通的算法路线
 
+> **更正（2026-10-06 15:30，btsnoop 实测）**：本节前提错误。
+> - `LE Read Buffer Size v2` 显示控制器只有 **3 个 ISO 缓冲**（155 是包长），credit=3 是真实上限，不是饥饿 bug。
+> - 真实 NCP **1:1 回到栈**（TX≈NCP≈150/s），HAL 并未吞 NCP；ISO 以 H4 type 5 正常收发，"包装成 vendor 命令"不成立。
+> - 合成 NCP 让栈对控制器超发 → 控制器挂死 → SSR，这正是后来"起流 2s 必崩"的根因（root-causes 第 9 节）。
+> - 不合成时实测吞吐 150/s（不是 30 或 36/s），瓶颈见 root-causes 9.1。
+>
+> 下面原文仅供追溯。
+
 **背景**：卡顿根因是 credit 饥饿（3 credit × 10Hz 轮询 = 30 SDU/s < 100 SDU/s 需求）。
 
 **试过的**：
@@ -137,6 +145,41 @@ bind mount 只保留给 VINTF XML 的零写入预验证（见 operations.md 第 
 | `persist.vendor.service.bdroid.sibs=false` | 设为 false 实验，速率不变 | 无效果，已记录待恢复默认 |
 
 ---
+
+## 7. v4.x 系列（2026-10-06 下午）：换掉“哪种主机调度”都不能胜过固件流水线
+
+**投入**：v4.0 credit 代理 + v4.1 CIG 参数截断，约 2 小时、5 次热部署、1 次重启。
+**止损时机**：第二次看到“改了调度参数但吞吐纹丝不动地钉在 150.0/s”时就该测 hold 了
+（后来一测就一锤定音：`send call avg=128us`、`hold avg=19880us`）。
+
+### 7.1 vendor 的 `audio_set_configurations.json` 是死文件
+
+模块里改的 `/vendor/etc/bluetooth/le_audio/audio_set_configurations.json`（293KB）栈根本不读：
+`libbluetooth_jni.so` 的字符串证据 —— 配置全部来自 `/apex/com.android.bt/etc/bluetooth/le_audio/`，
+而 `/apex` 在红线分区清单里。改 apex 才能影响场景→配置选择。
+
+### 7.2 credit 代理不能提高吞吐
+
+代理把栈侧丢包归零、每包补发时刻紧跟 NCP（距下一 anchor 最多 8ms 余量），
+但 NCP 需求恒 ~19.9ms（2×10ms）：瓶颈在固件 SDU 流水线，不在主机（root-causes 12）。
+代理仍保留：它把丢包收敛到 shim（延迟有界），且栈侧 credit 零抖动。
+
+### 7.3 MEDIA 场景 + 3 缓冲 = 40ms/BN=4 灾难
+
+去掉录音元数据后栈选 `48_4_High_Reliability`（maxlat 100ms）→ 控制器选 ISO_Interval=40ms、
+BN=4、FT=2 → 双耳每间隔需 8 缓冲 → **38/s**（比 LIVE 还糟）。v4.1 截 maxlat=10ms 恢复
+10ms/BN=1。教训：**场景与 qos 目标一起决定控制器调度；换场景后必须重测**。
+
+### 7.4 改函数入口不能碰 paciasp
+
+把 `UpdateSinkMetadata` 的 `paciasp` 改成 `ret` → PLT 间接调用没有 BTI 落点 →
+音频 HAL `SIGILL (ILL_ILLOPC)` crash loop ~15 次。正解：保留 paciasp，从第二条指令起写
+`autiasp; ret`。
+
+### 7.5 在跑的 HAL 面前 `cp` 覆盖它的 .so
+
+`cp` 原地重写同一 inode，运行中的 HAL 已 mmap 该文件，代码页被换 → 老 HAL SIGSEGV
+（tombstone 栈顶在 impl-qti.so）。deploy 脚本已改为先 stop 后 cp 再 start。
 
 ## 总结：我的思维误区
 

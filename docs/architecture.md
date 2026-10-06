@@ -65,6 +65,17 @@ AudioFlinger
 
 `libbluetooth_qti_real.so` 特性：**file offset == vaddr**，反汇编/找符号直接用绝对地址。
 
+**`audio.bluetooth.default.so`（模块内，原始 md5 `1b96c842…`，现 `9769dbee…`）**：
+
+| 地址 | 原值 | 改后 | 作用 |
+|---|---|---|---|
+| `0x11548` | `sub sp, sp, #0x90` | `autiasp` | 与入口 `paciasp` 配对 |
+| `0x1154c` | `stp x29, x30, [sp,#0x40]` | `ret` | `BluetoothAudioPortAidl::UpdateSinkMetadata` 变空函数 → HAL 不再把录音元数据转给栈（root-causes 第 11 节） |
+
+**入口 `0x11544` 的 `paciasp` 绝不能改**：它同时是 BTI 落点。函数经 PLT 被 `br` 间接调用，
+把它换成 `ret` 会 `SIGILL (ILL_ILLOPC)`，音频 HAL 每次打开 BLE 输入都崩（2026-10-06 实测）。
+同理，任何改函数入口的补丁都要保留 `paciasp`/`bti c`。此库 text 段 file offset == vaddr。
+
 ### 2.3 shim（C++，NDK30）
 
 `bluetooth_hci_shim/BluetoothHciHook.cpp`，编译成 `android.hardware.bluetooth@1.0-impl-qti.so`
@@ -86,36 +97,47 @@ AudioFlinger
 
 ## 3. 构建配方
 
+前置准备放在 `/tmp/leaudio_build/`（`/tmp` 重启会清空，丢了就按下表重建）：
+
+| 路径 | 作用 / 来源 |
+|---|---|
+| `inc/__config_site` | 拷贝 `$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/c++/v1/__config_site`，把 `_LIBCPP_ABI_NAMESPACE __ndk1` 改成 `__1`（设备 libc++ 只有 `std::__1`；`-D` 覆盖无效） |
+| `inc/hidl/ConcurrentMap.h` | AOSP `system/libhidl/transport/include/hidl/ConcurrentMap.h`（只依赖 `<mutex>` `<map>`） |
+| `lib/libhidlbase.so` `lib/libutils.so` `lib/libc++.so` | `adb pull /system/lib64/<lib>.so` |
+| `lib/libbluetooth_qti_real.so` | 模块里的 4 补丁版（md5 `ce7fed1c…`） |
+
 ```bash
 NDK=/opt/android-sdk/ndk/30.0.16248370    # clang 21.0.0 r574158c，与设备平台同代
-$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ \
-  --target=aarch64-linux-android24 -shared -fPIC -O2 -std=c++17 \
-  -I/tmp/ndk_platform_config -I/tmp/system_libhidl/transport/include \
+B=/tmp/leaudio_build; T=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin
+$T/clang++ --target=aarch64-linux-android24 -shared -fPIC -O2 -std=c++17 -I$B/inc \
   -Wl,-soname,android.hardware.bluetooth@1.0-impl-qti.so \
-  bluetooth_hci_shim/BluetoothHciHook.cpp -o /tmp/shim_v314.so \
-  -L/tmp -lhidlbase -lutils -lc++ -l:libbluetooth_qti_real.so -llog
-$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip --strip-all /tmp/shim_v314.so
+  bluetooth_hci_shim/BluetoothHciHook.cpp -o $B/shim_v41.so \
+  -L$B/lib -lhidlbase -lutils -lc++ -l:libbluetooth_qti_real.so -llog
+$T/llvm-strip --strip-all $B/shim_v41.so
+SER=$SERIAL ./deploy_shim_fileonly.sh $B/shim_v41.so   # 先 stop HAL 再覆盖，再 start
 ```
 
-**三个必须的 `-I` / `-L` 前置准备**（否则 dlopen 失败）：
-
-| 路径 | 作用 |
-|---|---|
-| `/tmp/ndk_platform_config/` | NDK 的 `__config_site` 无条件 `#define _LIBCPP_ABI_NAMESPACE __ndk1`，`-D` 覆盖无效。拷贝该文件到前置 `-I` 目录，把 `__ndk1` 改成 `__1`（设备 libc++ 只有 `std::__1`） |
-| `/tmp/system_libhidl/transport/include/` | HIDL transport 头 |
-| `/tmp/*.so` | 链接用的设备库：`libhidlbase.so` `libutils.so` `libc++.so` `libbluetooth_qti_real.so`（从设备 `/vendor/lib64` 提取） |
+构建后自检：`llvm-readelf -d` 的 NEEDED 应与旧版一致；`llvm-nm -D --undefined-only` 与旧版 diff，
+新增符号必须在设备库里存在（`llvm-nm -D --defined-only lib/libhidlbase.so`）。
 
 **ABI tag 症状速查**：符号带 `B9nqn230101` 后缀 = 新 libc++ = 布局与设备不兼容 → 必须换 NDK 版本。
 
 ## 4. shim 运行时开关（`persist.vendor.leaudio.*`）
 
-| 属性 | 默认 | 作用 |
-|---|---|---|
-| `isocred.window` | 12 | 窗口式 credit（保持 W 个在飞）；0 = 诚实回声。**热调，无需重启** |
-| `ncpsynth` | 1 | 合成 NCP 事件 |
-| `iso.patchring` | 1 | ring buffer type-5 补丁 |
-| `iso.strip4` | 1 | 剥掉 4 字节 framed 前缀 `[2B 序号][2B 长度]` |
-| `isocred.mult` | 6 | 早期乘法式 NCP —— **已知会下溢，勿用**（见 dead-ends.md） |
+标 *缓存* 的在首次使用后缓存（`static`），改完需 `stop/start vendor.bluetooth-1-0-qti`；
+标 *实时* 的每次下发 `LE Set CIG Parameters` 时重读，`setprop` 后暂停→播放（CIG 重建）即可。
+
+| 属性 | 当前值 | 读取 | 作用 |
+|---|---|---|---|
+| `isoproxy` | 1（默认） | 缓存 | v4.0 credit 代理：ISO 包排队，在飞 ≤ 控制器缓冲数（从 `0x2060` 读到 3），用真实 NCP 回补栈 credit。0 = 直发 |
+| `isoproxy.qmax` | 4（默认） | 缓存 | 每 handle 队列上限，满了丢最旧（限制延迟） |
+| `cig.maxlat` | 10（默认） | 实时 | v4.1 把 `0x2062` 的 Max_Transport_Latency 截到 N ms（0=关）。不截时 MEDIA 配置会让控制器选 40ms/BN=4 → 只剩 38 包/s |
+| `cig.maxrtn` | -1（关） | 实时 | 截 RTN（每 CIS 的 rtn 字段）。实测缩短 CIG 事件对吞吐无帮助，只会降低空口可靠性，保持关闭 |
+| `ncpsynth` | **0** | 缓存 | 合成 NCP。**必须为 0**：控制器只有 3 个 ISO 缓冲，合成 credit 导致超发 → 控制器挂死（root-causes 第 9 节） |
+| `iso.strip4` | **0** | 缓存 | 剥掉 HCI ISO 头里的 `Packet_Sequence_Number`+`ISO_SDU_Length`。**必须为 0**：那是规范强制字段（root-causes 第 8 节更正）。v4.0 起属性缺失时默认 0 |
+| `isocred.window` | 12 | 实时 | 仅在 `ncpsynth=1` 时有意义 |
+| `iso.patchring` | 1 | 缓存 | ring buffer type-5 补丁 |
+| `isocred.mult` | 1 | 实时 | 早期乘法式 NCP —— **已知会下溢，勿用**；v4.0 起默认 1（关） |
 
 ## 5. AArch64 / HIDL ABI 硬知识
 

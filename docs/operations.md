@@ -8,17 +8,20 @@
 
 ```bash
 cd .
-SER=$SERIAL ./deploy_shim_fileonly.sh /tmp/shim_v314.so
+SER=$SERIAL ./deploy_shim_fileonly.sh /tmp/leaudio_build/shim_v41.so
 ```
 
 脚本做的事（**顺序不能变**）：
 
 ```bash
 adb -s $SER push "$SRC" /data/local/tmp/shim_new.so          # 1. push 到 tmp（label 无关）
+adb -s $SER shell su -c "stop vendor.bluetooth-1-0-qti"        # 2. 先停 HAL：运行中的 HAL 已 mmap
+                                                               #    该 .so，原地覆盖会 SIGSEGV（dead-ends 7.5）
 adb -s $SER shell su -c "cp /data/local/tmp/shim_new.so $HW/android.hardware.bluetooth@1.0-impl-qti.so"
 adb -s $SER shell su -c "chmod 644 $HW/android.hardware.bluetooth@1.0-impl-qti.so"
-adb -s $SER shell su -c "chcon u:object_r:vendor_file:s0 $HW/..."   # 2. 必须 chcon
-adb -s $SER shell su -c "ls -Z $HW/ ; md5sum ..."                    # 3. 核对 label + md5
+adb -s $SER shell su -c "chcon u:object_r:vendor_file:s0 $HW/..."   # 3. 必须 chcon
+adb -s $SER shell su -c "ls -Z $HW/ ; md5sum ..."                    # 4. 核对 label + md5
+adb -s $SER shell su -c "start vendor.bluetooth-1-0-qti"      # 5. 重启 HAL（栈自行 abort 后重启）
 ```
 
 ### 三条铁律
@@ -27,11 +30,8 @@ adb -s $SER shell su -c "ls -Z $HW/ ; md5sum ..."                    # 3. 核对
    magic mount 原样带到 `/vendor`，HAL 无权 `map`（见 root-causes.md 根因 5）
 2. **`restorecon` 无效** —— `/data/adb` 在 `file_contexts` 里本就是 `adb_data_file`，
    restorecon 会把错 label 设回去。必须 `chcon u:object_r:vendor_file:s0`
-3. **改 label 不需要重启**（magic mount 跟随源文件），但 HAL 必须重启：
-
-```bash
-adb -s $SERIAL shell 'stop vendor.bluetooth-1-0-qti; start vendor.bluetooth-1-0-qti'
-```
+3. **改 label 不需要重启**（magic mount 跟随源文件），但 **HAL 必须先停再复制**，
+   脚本已内置；音视频类 HAL（如 `audio.bluetooth.default.so`）同理，否则 crash loop。
 
 ### 热更新 vs 重启
 
@@ -184,6 +184,14 @@ done
 
 见 root-causes.md 根因 5。修复 = `chcon` + `stop/start vendor.bluetooth-1-0-qti`，
 **不需要重启**。
+
+### 事故三：音频 HAL 补丁碰了 paciasp → crash loop（2026-10-06 下午）
+
+把 `audio.bluetooth.default.so` 的 `UpdateSinkMetadata` 入口 `paciasp` 改成 `ret` →
+PLT 间接调用没有 BTI 落点 → 每次开 BLE 输入都 `SIGILL (ILL_ILLOPC)`，音频 HAL crash loop
+~15 次（约 1 分钟）。**不重启就热修**：`cat 新文件 > 模块内文件`（同 inode，magic mount
+即时可见）+ init 自动重启的音频 HAL 加载新代码，~30s 内自愈。
+教训：改函数入口必须保留 `paciasp`/`bti c`（见 architecture.md 2.2、dead-ends.md 7.4）。
 
 ---
 

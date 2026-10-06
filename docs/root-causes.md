@@ -315,7 +315,13 @@ A2DP 为 STOPPED → `audio_get_codec_config` 返回空（`cbz x0, 0xc5c44`）�
 
 ---
 
-## 8. 满码率帧长超过 `Max_SDU` → Unframed CIS 分包 → 芯片固件挂死
+## 8. ~~满码率帧长超过 `Max_SDU` → Unframed CIS 分包 → 芯片固件挂死~~（**错误结论，2026-10-06 15:00 推翻**）
+
+> **更正**：HCI ISO 包里 `[2B 序号][2B 长度]` 不是"AOSP framed-SDU 头"，而是 HCI 规范强制的
+> `Packet_Sequence_Number` + `ISO_SDU_Length`（Core Spec Vol 4 Part E §5.4.5，PB=0b00/0b10 时必须存在），
+> 不计入 `Max_SDU`。`iso.strip4=1` 会产生畸形包（PB=3 续片还会被误剥掉 4 字节音频）。
+> 实测 `strip4=0` 时包结构正确，崩溃依旧 —— 崩溃真因见第 9 节。**`strip4` 必须为 0。**
+> 下面原文仅供追溯。
 
 **协商值**（btsnoop 解出 `LE Set CIG Parameters` opcode `0x2062`）：
 
@@ -333,7 +339,43 @@ Max_Transport_Latency_C2P=100ms  CIS_Count=2
 
 ---
 
-## 9. credit 饥饿 → 卡顿（已被 shim 窗口机制解决）
+## 9. 合成 NCP（`ncpsynth=1`）让控制器缓冲溢出 → 控制器挂死 → SSR（**真正的崩溃根因**）
+
+**更正（2026-10-06 15:07，btsnoop + A/B 实测）**：
+
+- `LE Read Buffer Size v2` 返回 `ACL 251×16, ISO_Data_Packet_Length=155, Total_Num_ISO_Data_Packets=3`。
+  **控制器只有 3 个 ISO 缓冲**；旧文档把 155（包长）误读成缓冲个数。栈侧 credit=3 是对的，不是 bug。
+- 控制器的真实 NCP（0x13）**会 1:1 回到栈**（btsnoop：TX≈NCP≈150/s），"QTI HAL 吞 NCP" 不成立。
+- shim 合成 NCP 一次发 33 个 credit → 栈向 3 缓冲的控制器超发 → 首包后 ~90ms 控制器不再响应
+  → `READ_CLOCK(0x1407)` 2s 超时 → `UART err 0x51` → SSR → HAL 自杀 → 栈 abort。
+
+| 测试 | 结果 |
+|---|---|
+| `strip4=1 ncpsynth=1`（旧默认） | 每次起流 ~2s 崩（10-06 共 4 次） |
+| `strip4=0 ncpsynth=1` | 照崩（2 次） |
+| `strip4=0 ncpsynth=0` | **不崩**，STREAMING 持续 10+ 分钟，ISO RX 200/s |
+
+**修复**：`system.prop` 中 `ncpsynth=0`、`strip4=0`（已部署，md5 `25a73fe1…`）。
+
+### 9.1 剩余问题：吞吐上限 150/s → 约 25% 丢帧（卡顿）
+
+需求 200 SDU/s（2 CIS × 10ms），实际 ~150/s，栈 `dropping ISO packet, iso credits: 0` ~50/s。
+
+- CIS 参数（`LE CIS Established`）：ISO_Interval 10ms，NSE=3，BN=1，FT=1，Transport_Latency 7.17ms，双向
+- TX→NCP 占用时间 13.6–16.9ms（随起流相位变化），NCP 在 CIS anchor 后约 8ms 到达主机
+- 栈每 10ms 一次性发 2 包、无 credit 即丢弃。占用 >10ms ⇒ 下一 tick 只剩 1 个 credit ⇒ 2,1,2,1… = **150/s**，
+  与占用时间具体值无关；要 200/s 需要每包在 10ms 内回 NCP，实际不可达
+- 耳机 PAC：`Max Codec Frames Per SDU = 1` ⇒ 不能靠多帧打包降包率
+- 当前场景是 `LIVE`（双向，耳机麦克风也在流），因音频策略在连接时探测 BLE 输入留下录音元数据；
+  改成单向 MEDIA 可缩短 CIG 事件、提前 NCP，但不改变上面的离散 2,1,2,1 结构
+
+**后续（v4.0/v4.1 实测）**：credit 代理已实现并部署（在飞 ≤3、真实 NCP 回补、每 5s 统计行）。
+栈侧丢包归零（栈恒满 credit），但控制器仍只完成 150/s，多余的 ~50/s 改在 shim 队列里丢 ——
+天花板不在主机调度，见第 12 节。
+
+---
+
+### 以下为旧版第 9 节原文（数学推导基于错误前提，仅供追溯）
 
 **数学闭环**：
 
@@ -378,5 +420,61 @@ vendor 命令发芯片，每包回一条 CC（计数器 +319/条）→ 芯片真
 7. invalid encoder config / btaudio_offload STOPPED ?
    └─ 走到了 offload 路径 → system.prop 没关 offload（根因 7）
 
-8. 以上全无 + 链路全通 + AudioFlinger 在写 → 真正需要人耳验证
+8. on_hci_timeout READ_CLOCK(0x1407) + UART err 0x51 + SSR，且起流后 ~2s 发生 ?
+   └─ 查 persist.vendor.leaudio.ncpsynth 是否为 0（根因 9）；strip4 也应为 0（根因 8 更正）
+
+9. 不崩但 dropping ISO packet ~50/s → 吞吐上限 150/s（根因 9.1），需 shim credit 代理
+
+10. 以上全无 + 链路全通 + AudioFlinger 在写 → 真正需要人耳验证
 ```
+
+---
+
+## 11. 硬件 offload（已判死路）之外的第二条音频 HAL 死路：录音元数据污染场景
+
+**现象**：听音乐时 `Current scenario: LIVE`、`Recording metadata context type mask: 0x0040`、
+每个耳机的 source ASE 也在 STREAMING —— 耳机麦克风全程陪跑，白白拖长 CIG 事件。
+
+**机制（日志证据链）**：
+1. 耳机一连上，APM 探测 BLE 输入设备：`APM::HwModule: createDevice: adding dynamic device
+   AUDIO_DEVICE_IN_BLE_HEADSET` → `adev_open_input_stream: device=0xa0000000` →
+   `in_update_sink_metadata_v7: state=STANDBY, 1 track(s)`。
+2. AOSP `stream_apis.cc` 的 `in_update_sink_metadata_v7` 开头就是
+   `if (sink_metadata == nullptr || sink_metadata->track_count == 0) return;`
+   —— **"0 tracks"（录音结束）的上报被 HAL 静默丢弃**，栈的
+   `local_decoding_context_types_` 永远停在 LIVE。
+3. 栈自己的 workaround（`client.cc` VBC close timeout + `audio_hal_is_capable_to_send_empty_metadata_`）
+   依赖 `leaudio_use_context_type_manager` flag 的一组时序，在本机上没有触发（日志实测
+   `local_decoding_context_types_` 数分钟仍是 0x0040）。
+
+**修复**：模块内 `audio.bluetooth.default.so` 把
+`BluetoothAudioPortAidl::UpdateSinkMetadata` 打成空函数（`0x11548` autiasp + `0x1154c` ret，
+**入口 paciasp 不能动，见 architecture.md 2.2**）。此 HAL 只服务 BLE 输入的元数据转发，
+禁掉后音乐走 MEDIA sink-only；通话场景由 inCallState/CONVERSATIONAL 驱动，不依赖这条路径。
+代价：耳机麦克风录音（通话以外的录音 app）可能选不到录音场景。
+
+**首次补丁翻车记录**：把入口 `paciasp` 改成 `ret` → 音频 HAL 每次开 BLE 输入都
+`SIGILL (ILL_ILLOPC)`（paciasp 同时是 BTI 落点），crash loop ~15 次后热修复，未重启设备。
+
+## 12. 终局根因：固件 ISO 流水线每包占 2 个间隔 → 双耳 150/s 硬上限
+
+**测量（shim 内打点，2026-10-06 15:53，maxrtn=-1）**：
+
+```
+hold(send->NCP) avg=19880us max=24936us n=750, send call avg=128us
+```
+
+- `send call avg=128us`：HAL 的 `sendDataToController` 只入 ring，即时代回。
+- **每包从下发到 NCP 恒 ~19.9ms ≈ 2×10ms 间隔**，与 CIG 事件长度无关：
+  NSE=4/CSD 7.2ms、NSE=2/3.5ms、NSE=1/1.7ms 全部 150/s；即使补发时刻距下一 anchor
+  有 8ms 余量也一样（对齐类假设全部证伪）。
+- 结论：**控制器固件把 ISO SDU 流水线化到"下下个" CIS 事件**，每包占缓冲 ~20ms。
+  3 缓冲 × (1/0.02s) = **150 包/s**。双耳需 200/s（每 CIS 每包 1 帧不可降，
+  耳机 PAC `Max Codec Frames Per SDU = 1`），缺口恒 25%。
+
+**推论**：单耳（1 CIS，需 100/s ≤ 150/s）满速无丢包 —— 与人耳实测一致；
+双耳在本固件上任何主机侧手段都无法满速。唯一出路是报告更多 ISO 缓冲/更短流水线的
+BT 固件（`/vendor/bt_firmware`，按红线不可写，只能换包）。
+
+**当前取舍**：v4.1 代理模式下丢包集中在 shim（每 handle 深度 qmax=4、丢最旧、延迟有界 ~40ms），
+栈侧零丢包、零 credit 抖动；关掉代理（`isoproxy=0`）则退回栈侧每 tick 丢包，听感无差别。
