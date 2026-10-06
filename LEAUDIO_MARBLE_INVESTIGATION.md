@@ -242,7 +242,7 @@ killall com.android.bluetooth; killall audioserver
 | Profile 服务 | 14 个（无 `LeAudioService`/`VolumeControlService`/`CsipSetCoordinator`/`HapClient`/`BassClient`） |
 | `LE Audio` | `Connected: 0` |
 | 6 个属性 | 全部为空 |
-| 白名单模块 | Zygisk Vector `v2.2 (3080-88f8e1fa-JingMatrix-Vector)`、HMA-OSS `oss-173`、NeoZygisk `v2.4 (289-08080ef-release)` —— 全部 enabled，未被改动 |
+| 白名单模块 | 三个只读白名单模块均 enabled，本次未改动（模块名/版本记于本地笔记，不入库） |
 
 ---
 
