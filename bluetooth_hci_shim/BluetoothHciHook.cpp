@@ -63,7 +63,7 @@ extern "C" int __system_property_get(const char* name, char* value);
 // drives the offset past the end of the buffer, at which point
 // `sizeof(buf) - off` wraps to a huge size_t and bionic's FORTIFY turns it
 // into __fortify_fatal() -> abort(). That exact bug aborted the HAL on the
-// very first forwarded ISO RX packet (2026-10-06): char h[96] + 8 rounds of
+// very first forwarded ISO RX packet: char h[96] + 8 rounds of
 // a 17-char format = 136 > 96, and round 7 got size == (size_t)-6.
 // See git log "fix(shim): hexdump 缓冲区溢出" for the full tombstone.
 //
@@ -612,7 +612,7 @@ int32_t HookedBinderTransact(void* thiz, uint32_t code,
                 anyFlag1 = true;
                 // v3.4: honest NCP synthesis — fixes the credit starvation.
                 //
-                // Facts (verified with a full btsnoop capture, 2026-10-05):
+                // Facts (verified with a full btsnoop capture):
                 //  * transport level (HAL<->controller): the controller DOES send
                 //    standard NCPs (0x13) for every ISO packet, 1:1 with our ISO
                 //    data packets (handle 0x05: 686 sent / 686 completed).
@@ -1019,7 +1019,7 @@ static bool IsoStrip4Enabled() {
 // ---------------------------------------------------------------------------
 // v4.0 ISO credit proxy.
 //
-// Measured (btsnoop, 2026-10-06): the controller has only 3 ISO buffers
+// Measured (btsnoop, stock firmware 00570): the controller has only 3 ISO buffers
 // (LE Read Buffer Size v2) and returns real NCPs 1:1, ~8 ms after the CIS
 // anchor. The stack sends both CIS packets together every 10 ms and DROPS
 // when it has no credit, so with 2 CIS it is stuck at 2,1,2,1... = 150/s
@@ -1467,7 +1467,7 @@ void DumpHciCommandIfInteresting(const ::android::hardware::Parcel& data, uint32
 // With only 3 ISO buffers, the controller must run a 10 ms ISO interval with
 // BN=1. For MEDIA the stack asks for up to 100 ms latency, and the controller
 // then picks ISO_Interval=40ms, BN=4, FT=2 -> 8 SDUs must be buffered for two
-// CIS -> ~38 SDU/s (measured 2026-10-06). Capping the latency makes it choose
+// CIS -> ~38 SDU/s (measured). Capping the latency makes it choose
 // 10 ms / BN=1 / FT=1 (same as the LIVE config, which reached 150/s).
 // Incoming binder buffers are read-only, so the command is copied, patched and
 // sent via the stock sendDataToController(COMMAND), exactly what the stock

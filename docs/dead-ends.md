@@ -2,6 +2,10 @@
 
 **这一章的目的是浪费时间前先读一遍。** 每条都标了投入成本和"早该什么时候止损"。
 
+> **固件版本前提**：第 4、7.2、7.3 节涉及蓝牙栈 / 控制器的测量，都是在**原厂蓝牙固件
+> 00570**（控制器只有 3 个 ISO 缓冲）上得出的。当前使用上游固件 **00680**（22 个 ISO 缓冲），
+> 这些数字和结论**不代表当前状况**。
+
 ---
 
 ## 1. 硬件 Offload（ADSP 编码）—— 最大的时间黑洞
@@ -55,66 +59,66 @@ PAL: StreamPCM: start: 451: Rx device start failed with status -22
 
 ---
 
-## 2. 反复手动 `mount -o bind` —— 被用户明确斥责过仍重犯
+## 2. 用 `mount -o bind` 覆盖 `/vendor` 文件做热验证
 
-**AGENTS.md 与用户都明确说过**：只维护 `/data/adb/modules/` 下模块目录文件，
-重启后由 KernelSU magic mount（只读）统一生效。
+**做法**：为了不重启就验证，直接 `mount -o bind` 覆盖 `/vendor/etc/...` 和 `/vendor/lib64/...`。
 
-**我犯的错**：
-- 为了"热验证不用重启"，多次 `mount -o bind` 覆盖 `/vendor/etc/...`
-- 后果 1：`SELinux: avc: denied { execmem }` + `couldn't map segment: Permission denied`
-  → HAL 起不来
-- 后果 2：旧 inode 残留叠加挂载，`umount` 后视图仍不对
-- 后果 3：违反用户明确指示，损失信任
+**后果**：
+- `SELinux: avc: denied { execmem }` + `couldn't map segment: Permission denied` → HAL 起不来
+- 多次挂载叠加，旧 inode 残留，`umount` 后视图仍不对
+- 绕过了模块，状态无法随模块启用/禁用统一管理
 
-**正确做法**：模块内文件热更新（magic mount 是 inode bind，`cat 新so > 模块内文件` 即时生效）
-+ `stop/start vendor.bluetooth-1-0-qti` 重启 HAL，**不需要重启手机**。
-bind mount 只保留给 VINTF XML 的零写入预验证（见 operations.md 第 4 节），且必须 umount + md5 核对。
+**正确做法**：只改模块目录内的文件。已存在的文件原地覆盖（同 inode）即时可见，
+配合 `stop/start vendor.bluetooth-1-0-qti` 重启 HAL，**不需要重启手机**（先停 HAL 再覆盖，见 7.5）。
+bind mount 只用于 VINTF XML 的零写入预验证（见 operations.md 第 4 节），且必须 umount + md5 核对。
 
 ---
 
-## 3. git 里存的"原厂 manifest 基线"是我推測的
+## 3. 拿错了"原厂文件"做对比
 
-**现象**：对 bootloop 根因判断反复跑偏，试了四五轮 manifest 写法都不对。
+**背景**：要让系统使用 HIDL 1.1 蓝牙 HAL，需要修改 VINTF manifest（`manifest_ukee.xml`）里的
+蓝牙声明。改错会导致 bootloop（见 root-causes 第 6 节）。排查时需要拿改动后的文件和原厂文件对比。
 
-**根因**：git 里的 `manifest_ukee.xml` 标称"原厂基线"（12136B），
-实际内容是 `<version>1.1</version>` + `<interface>` 写法 —— **是我自己推測的，不是原厂的**。
-原厂真实内容（12037B, md5 `e6798c05eb67713485cbf79567d70f69`）是
+**问题**：仓库里当作"原厂文件"保存的那份 `manifest_ukee.xml`（12136B）其实**不是从设备上
+导出的**，而是调试过程中手写的，内容已经是改过的 `<version>1.1</version>` + `<interface>` 写法。
+真正的原厂文件（12037B，md5 `e6798c05eb67713485cbf79567d70f69`）写的是
 `<fqname>@1.0::IBluetoothHci/default</fqname>`。
 
-基于错基线的所有 diff 和推断全部无效。
+**后果**：拿它做对比得出的所有差异和推断都是错的，bootloop 原因因此排查了四五轮。
 
-**教训**：**基线文件必须从设备实际提取并记 md5，不能凭印象或推断写。**
-"我记得原厂是这样的"是调试中最贵的幻觉。
+**教训**：对比用的原厂文件必须从设备导出并记录 md5，不能凭记忆手写。
+现在由 `scripts/dump_device_binaries.sh` 从设备导出。
 
 ---
 
-## 4. NCP 信用倍增 / 合成 NCP —— 一条走不通的算法路线
+## 4. 伪造 NCP 给协议栈"加额度"（固件 00570 时期）
 
-> **更正（2026-10-06 15:30，btsnoop 实测）**：本节前提错误。
-> - `LE Read Buffer Size v2` 显示控制器只有 **3 个 ISO 缓冲**（155 是包长），credit=3 是真实上限，不是饥饿 bug。
-> - 真实 NCP **1:1 回到栈**（TX≈NCP≈150/s），HAL 并未吞 NCP；ISO 以 H4 type 5 正常收发，"包装成 vendor 命令"不成立。
-> - 合成 NCP 让栈对控制器超发 → 控制器挂死 → SSR，这正是后来"起流 2s 必崩"的根因（root-causes 第 9 节）。
-> - 不合成时实测吞吐 150/s（不是 30 或 36/s），瓶颈见 root-causes 9.1。
->
-> 下面原文仅供追溯。
+**NCP 是什么**：HCI 的 *Number Of Completed Packets* 事件（event code `0x13`）。
+控制器每发完一个数据包、空出一个缓冲，就用 NCP 告诉主机"又有 N 个缓冲可用了"。
+主机侧协议栈按 NCP 记账（credit）：手里有 credit 才发包，没有就丢包。
+credit 总数 = 控制器报告的缓冲数（`LE Read Buffer Size v2`，opcode `0x2060`）。
 
-**背景**：卡顿根因是 credit 饥饿（3 credit × 10Hz 轮询 = 30 SDU/s < 100 SDU/s 需求）。
+**当时的误判**：协议栈只有 3 个 credit，播放时大量 `dropping ISO packet, iso credits: 0`。
+误以为是"控制器缓冲很多，但 HAL 把 NCP 吞了，导致 credit 饥饿"。
 
-**试过的**：
+**试过的**：在 shim 里伪造 NCP，让协议栈以为控制器空出了更多缓冲：
 
 | 方案 | 结果 |
 |---|---|
-| v3.2 `isocred.mult=6`（倍增 NCP 完成数） | `used_credits` **下溢** → ISO 洪泛 → 固件 Hardware Error 0x0f → 全栈崩溃 |
-| v3.3j `count=1` FIFO（诚实回声） | dropping 0、credits 满、发送率放开 —— 但**耳机整机周期性掉线重启**（双耳同断 reason -2，30-60s 周期，TWS 同步重启），听感无改善 |
-| v3.3c 钩 `mRemote->transact` 倍增 | 钩子触发了（`transact hook: evt parcel #1`），但芯片真实节奏 ~27ms/包不变 |
+| 按倍数放大 NCP 里的完成数（`isocred.mult`） | 协议栈 credit 计数下溢 → 大量超发 → 控制器 Hardware Error → 蓝牙崩溃 |
+| 每发一包回一个 NCP（`ncpsynth=1`，`isocred.window=0`） | 协议栈不再丢包，但耳机周期性掉线 |
+| 保持固定数量 credit 在途（`ncpsynth=1`，`isocred.window=12`） | 起流约 2 秒后控制器挂死 → SSR |
+| 在 binder 层钩 `transact` 放大 NCP | 钩子生效，但芯片处理节奏不变 |
 
-**关键发现**：CC opcode `0x1407` 与 `sendIsoData` **1:1**（1157 ≈ 发送数，计数器 +319/条）
-→ QCI UART 协议无 ISO 包类型，每个 ISO 数据包被包装成 vendor 命令发芯片
-→ 芯片内部有串行处理瓶颈，~36 SDU/s 是物理上限。
+**真相**（btsnoop 抓包确认）：
+- 固件 00570 的控制器**确实只有 3 个 ISO 缓冲**，3 个 credit 是真实上限，不是 bug
+- 控制器的真实 NCP 会 1:1 传到协议栈，HAL 并没有吞掉
+- 伪造 NCP 等于让协议栈往只有 3 个缓冲的控制器里硬塞包，必然挂死（root-causes 第 9 节）
 
-**教训**：先测出下游的**真实吞吐上限**再设计算法。3 credit 是表象，
-27ms/包才是墙。倍增算法只是让栈更快撞墙。
+**现状**：`ncpsynth=0`，不再伪造 NCP；shim 改为只按真实 NCP 放行（`isoproxy`）。
+缓冲不足的问题最终靠换固件 00680（22 个缓冲）解决，不是靠主机侧算法。
+
+**教训**：先测出下游的真实容量，再设计上游算法。
 
 ---
 
@@ -139,14 +143,14 @@ bind mount 只保留给 VINTF XML 的零写入预验证（见 operations.md 第 
 | `setprop ctl.restart audioserver` | AudioFlinger 只加载 primary 模块，usb/r_submix/bluetooth 全丢 | 验证 policy 改动必须重启设备 |
 | `setprop ctl.restart android.hardware.audio.service` | 失败 + policy 模块丢失 | 音频 HAL init 服务名是 `vendor.audio-hal`（rc 里带 `onrestart restart audioserver`） |
 | `input keyevent 85` 恢复播放 | 是切换键，会误暂停 | `input keyevent 126` 或 `cmd media_session dispatch play` |
-| 声明 BLE 输入端口（麦克风） | 栈选 LIVE **双向** 配置，耳机 Source PAC 只支持 1 声道 → `RECONFIGURATION_NEEDED` → ASE 永远 IDLE | 只声明 BLE **输出**端口 |
+| 只声明 BLE 输出、不声明 BLE 输入端口 | `createDevice: could not find HW module for device type 'AUDIO_DEVICE_IN_BLE_HEADSET'` → `APM failed to make available LE Audio device` → 路由永不切到耳机 | 必须声明 `BLE Headset In`。它会让栈选 LIVE 双向场景，由 audio HAL 补丁解决（root-causes 第 11 节） |
 | BLE 端口加进 `primary` 模块 | `onWriteError: write error -22 usecase(deep-buffer-playback)` 循环 | QTI primary HAL 不处理 BLE 设备 |
-| 误判崩溃归因 | v313 崩在 shim `snprintf`，我先怀疑蹦桌指令、SELinux、芯片固件，绕了一大圈 | tombstone 栈顶函数名就是答案，先读栈顶再猜 |
-| `persist.vendor.service.bdroid.sibs=false` | 设为 false 实验，速率不变 | 无效果，已记录待恢复默认 |
+| 误判崩溃归因 | v313 崩在 shim `snprintf`，先怀疑了蹦桌指令、SELinux、芯片固件，绕了一大圈 | tombstone 栈顶函数名就是答案，先读栈顶再猜 |
+| `persist.vendor.service.bdroid.sibs=false` | 设为 false 实验，速率不变 | 无效果，不要改 |
 
 ---
 
-## 7. v4.x 系列（2026-10-06 下午）：换掉“哪种主机调度”都不能胜过固件流水线
+## 7. v4.x 系列（固件 00570）：换掉“哪种主机调度”都不能胜过固件流水线
 
 **投入**：v4.0 credit 代理 + v4.1 CIG 参数截断，约 2 小时、5 次热部署、1 次重启。
 **止损时机**：第二次看到“改了调度参数但吞吐纹丝不动地钉在 150.0/s”时就该测 hold 了
@@ -181,11 +185,11 @@ BN=4、FT=2 → 双耳每间隔需 8 缓冲 → **38/s**（比 LIVE 还糟）。
 `cp` 原地重写同一 inode，运行中的 HAL 已 mmap 该文件，代码页被换 → 老 HAL SIGSEGV
 （tombstone 栈顶在 impl-qti.so）。deploy 脚本已改为先 stop 后 cp 再 start。
 
-## 总结：我的思维误区
+## 总结：判断误区
 
-1. **把"能解释现象的机制"当成"根因"**。UART `0x51` / `Hardware Error 0x0F` 我当成固件缺陷查了很久，
+1. **把"能解释现象的机制"当成"根因"**。UART `0x51` / `Hardware Error 0x0F` 被当成固件缺陷查了很久，
    实际是用户态 HAL 主动 SSR。
 2. **在错的基线上做增量推断**（manifest 事件）。
 3. **不先测下游能力上限就设计上游算法**（credit 倍增）。
-4. **偏好能立即验证的临时手段，而不是遵守既定约束**（bind mount）。
+4. **偏好能立即验证的临时手段，而不是走模块**（bind mount）。
 5. **忽略最便宜的检查**：grep 符号表 / 读 tombstone 栈顶 / 从设备提取基线。

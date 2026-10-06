@@ -1,7 +1,11 @@
 # 已确诊根因证据链
 
-每个根因都附**可复核的证据**（反汇编地址 / tombstone 栈 / 日志原文 / md5），
-不是"我觉得"，是"我验过"。
+每个根因都附**可复核的证据**（反汇编地址 / tombstone 栈 / 日志原文 / md5）。
+
+> **固件版本前提**：第 1–12 节都是在**原厂蓝牙固件 00570**（控制器只有 3 个 ISO 缓冲）上排查得出的。
+> 第 13 节起换成上游固件 **00680**（22 个 ISO 缓冲）。
+> HAL / VINTF / SELinux / 音频 HAL 相关的根因（第 1–7、11 节）与固件无关，修复仍在用；
+> 涉及控制器缓冲和吞吐的数字与结论（第 9、12 节）**不代表当前状况**。
 
 ---
 
@@ -190,7 +194,7 @@ q = 0,8,…,48 共 **7 轮** × 17 字符 = **119 > 96**。
 type-5 包经蹦桌到达 `_hidl_scoDataReceived`，且 shim 走进了 `code==5` 转发分支
 （崩在 `sIsoRxForwarded` 计数处）。
 
-**修复（commit `94125d6`）**：新增 `hexCat()`：
+**修复**：新增 `hexCat()`：
 
 ```cpp
 static inline void hexCat(char* buf, size_t cap, int* off, const char* fmt, ...)
@@ -202,7 +206,6 @@ static inline void hexCat(char* buf, size_t cap, int* off, const char* fmt, ...)
 ```
 
 `h[96]`→`h[160]`；全部 **9 处** hexdump 统一改 `hexCat`；所有缓冲区 `= {}` 初始化。
-产物 `/tmp/shim_v314.so` md5 `ea155cdbda8d4af27dd9625054565fb3`。
 反汇编确认 shim 内仅剩 hexCat 内一处 `vsnprintf`（`0x6d70`）。
 
 ---
@@ -235,8 +238,8 @@ avc: denied { map } for comm="android.hardwar"
   tclass=file permissive=0
 ```
 
-**根因**：`adb push` 把文件 stamp 成 `adb_data_file`，KernelSU magic mount 原样带到 `/vendor`
-（label 跟随源文件），`hal_bluetooth_default` 无权 `{ map }` adb_data_file。
+**根因**：`adb push` 把文件 stamp 成 `adb_data_file`，挂载到 `/vendor`
+后 label 不变（跟随源文件），`hal_bluetooth_default` 无权 `{ map }` adb_data_file。
 
 **对照**：同目录 `audio.bluetooth.default.so` 与 `libbluetooth_qti_real.so` 都是 `vendor_file`
 （当时用 `su -c cp` 部署），所以 v313 时代正常。
@@ -254,7 +257,7 @@ restorecon 会把错 label 原样设回去。
 
 **根因**：错误写法让 libvintf 解析**整份** device manifest 失败 → VINTF 检查全拒 → bootloop。
 
-**零写入预验证法**（AGENTS.md 允许的临时 bind mount，事后 umount + md5 核对）：
+**零写入预验证法**（临时 bind mount，事后 umount + md5 核对）：
 
 ```bash
 adb shell 'cp /vendor/etc/vintf/manifest_ukee.xml /data/local/tmp/same.xml; chmod 644 /data/local/tmp/same.xml'
@@ -288,8 +291,8 @@ bind mount **改动过**的文件 → `vintf dm` **0 行**、`Device Manifest? D
 **救援**：KernelSU 安全模式（音量减连按 3 次）→ safe mode 自动创建模块 `disable` 文件 →
 `adb root` 拿 uid=0 → 删掉误加的 fragment → 推正确格式。
 
-**教训**：git 里存的"原厂基线"曾被我推測成 `<version>1.1</version>`+`<interface>` 写法（错的），
-导致前期对 bootloop 根因判断完全跑偏。**基线必须从设备实际文件提取，不能推測。**
+**教训**：排查初期用作对比的"原厂文件"是手写的（已是 `<version>1.1</version>`+`<interface>` 写法），
+导致对 bootloop 根因的判断跑偏（dead-ends.md 第 3 节）。**对比基线必须从设备导出。**
 
 ---
 
@@ -315,47 +318,35 @@ A2DP 为 STOPPED → `audio_get_codec_config` 返回空（`cbz x0, 0xc5c44`）�
 
 ---
 
-## 8. ~~满码率帧长超过 `Max_SDU` → Unframed CIS 分包 → 芯片固件挂死~~（**错误结论，2026-10-06 15:00 推翻**）
+## 8. HCI ISO 包头的 4 字节不能剥（`iso.strip4` 必须为 0）
 
-> **更正**：HCI ISO 包里 `[2B 序号][2B 长度]` 不是"AOSP framed-SDU 头"，而是 HCI 规范强制的
-> `Packet_Sequence_Number` + `ISO_SDU_Length`（Core Spec Vol 4 Part E §5.4.5，PB=0b00/0b10 时必须存在），
-> 不计入 `Max_SDU`。`iso.strip4=1` 会产生畸形包（PB=3 续片还会被误剥掉 4 字节音频）。
-> 实测 `strip4=0` 时包结构正确，崩溃依旧 —— 崩溃真因见第 9 节。**`strip4` 必须为 0。**
-> 下面原文仅供追溯。
+HCI ISO 数据包里 handle/长度之后的 `[2B 序号][2B 长度]` 是 HCI 规范强制的
+`Packet_Sequence_Number` + `ISO_SDU_Length`（Core Spec Vol 4 Part E §5.4.5，PB=0b00/0b10 时必须存在），
+不计入 `Max_SDU`。早期曾误认为它是多余的 framed-SDU 头、是"超过 Max_SDU 导致芯片崩溃"的原因，
+在 shim 里加了 `iso.strip4` 剥掉它。
 
-**协商值**（btsnoop 解出 `LE Set CIG Parameters` opcode `0x2062`）：
-
-```
-CIG_ID=1  SDU_Interval_C2P=10000µs  Framing=0(UNFRAMED)
-Max_Transport_Latency_C2P=100ms  CIS_Count=2
-每个 CIS: Max_SDU_C2P=0x0078=120, PHY_C2P=2M, RTN_C2P=3
-```
-
-48kHz 满码率时音频帧加 4 字节 framed 前缀达 **158B > Max_SDU 155** → Unframed CIS 数据包被切片
-（155B + 3B）→ 高通芯片固件接不住切片包崩溃挂死。
-
-**规避**：码率降为 100B（48kHz）或 80B（32kHz），整包 ≤ 155B 不切片。
-**注意**：`audio_set_configurations.json` 里有 155-octet 预设，正是分包元凶，已改为 100。
+剥掉会产生畸形包（PB=3 续片还会被误剥掉 4 字节音频）；实测 `strip4=0` 时包结构正确，
+当时的崩溃依旧 —— 崩溃真因见第 9 节。**`strip4` 必须为 0。**
 
 ---
 
-## 9. 合成 NCP（`ncpsynth=1`）让控制器缓冲溢出 → 控制器挂死 → SSR（**真正的崩溃根因**）
+## 9. 合成 NCP（`ncpsynth=1`）让控制器缓冲溢出 → 控制器挂死 → SSR（固件 00570）
 
-**更正（2026-10-06 15:07，btsnoop + A/B 实测）**：
+**证据（btsnoop + A/B 实测）**：
 
 - `LE Read Buffer Size v2` 返回 `ACL 251×16, ISO_Data_Packet_Length=155, Total_Num_ISO_Data_Packets=3`。
-  **控制器只有 3 个 ISO 缓冲**；旧文档把 155（包长）误读成缓冲个数。栈侧 credit=3 是对的，不是 bug。
+  **控制器只有 3 个 ISO 缓冲**（155 是包长，曾被误读成缓冲个数）。栈侧 credit=3 是对的，不是 bug。
 - 控制器的真实 NCP（0x13）**会 1:1 回到栈**（btsnoop：TX≈NCP≈150/s），"QTI HAL 吞 NCP" 不成立。
 - shim 合成 NCP 一次发 33 个 credit → 栈向 3 缓冲的控制器超发 → 首包后 ~90ms 控制器不再响应
   → `READ_CLOCK(0x1407)` 2s 超时 → `UART err 0x51` → SSR → HAL 自杀 → 栈 abort。
 
 | 测试 | 结果 |
 |---|---|
-| `strip4=1 ncpsynth=1`（旧默认） | 每次起流 ~2s 崩（10-06 共 4 次） |
+| `strip4=1 ncpsynth=1`（旧默认） | 每次起流 ~2s 崩（共 4 次） |
 | `strip4=0 ncpsynth=1` | 照崩（2 次） |
 | `strip4=0 ncpsynth=0` | **不崩**，STREAMING 持续 10+ 分钟，ISO RX 200/s |
 
-**修复**：`system.prop` 中 `ncpsynth=0`、`strip4=0`（已部署，md5 `25a73fe1…`）。
+**修复**：`system.prop` 中 `ncpsynth=0`、`strip4=0`。
 
 ### 9.1 剩余问题：吞吐上限 150/s → 约 25% 丢帧（卡顿）
 
@@ -366,7 +357,7 @@ Max_Transport_Latency_C2P=100ms  CIS_Count=2
 - 栈每 10ms 一次性发 2 包、无 credit 即丢弃。占用 >10ms ⇒ 下一 tick 只剩 1 个 credit ⇒ 2,1,2,1… = **150/s**，
   与占用时间具体值无关；要 200/s 需要每包在 10ms 内回 NCP，实际不可达
 - 耳机 PAC：`Max Codec Frames Per SDU = 1` ⇒ 不能靠多帧打包降包率
-- 当前场景是 `LIVE`（双向，耳机麦克风也在流），因音频策略在连接时探测 BLE 输入留下录音元数据；
+- 当时场景是 `LIVE`（双向，耳机麦克风也在流），因音频策略在连接时探测 BLE 输入留下录音元数据（后由第 11 节解决）；
   改成单向 MEDIA 可缩短 CIG 事件、提前 NCP，但不改变上面的离散 2,1,2,1 结构
 
 **后续（v4.0/v4.1 实测）**：credit 代理已实现并部署（在飞 ≤3、真实 NCP 回补、每 5s 统计行）。
@@ -375,25 +366,7 @@ Max_Transport_Latency_C2P=100ms  CIS_Count=2
 
 ---
 
-### 以下为旧版第 9 节原文（数学推导基于错误前提，仅供追溯）
-
-**数学闭环**：
-
-- 栈侧 credit 池只有初始 **3**（`ISO Manager: Available credits: 3`），控制器实际有 **155** 个缓冲
-- QTI HAL 把控制器发来的真 NCP（0x13）**全部吞掉**（传输层 2410 条，栈侧 0 条）
-- 栈只能靠 HAL 自己的 `0x1407` 轮询（~10/s）补 credit
-- 稳态吞吐 = 3 × 10/s = **30 SDU/s**，而 LC3 10ms 帧需求是 **100 SDU/s**
-- Fluoride 丢包日志铁证：`btm_iso_impl.h:562 send_iso_data: dropping ISO packet, iso credits: 0`
-
-**CC opcode 0x1407 与 sendIsoData 1:1**（1157 ≈ 发送数）→ QCI 把每个 ISO 数据包包装成
-vendor 命令发芯片，每包回一条 CC（计数器 +319/条）→ 芯片真实处理节奏 ≈ 27ms/包。
-
-**已解决**：shim 窗口式 credit（`isocred.window=12`，保持 W 个 credit 在飞）。
-诚实回声式（发放数 = 发送数）不可能突破 30/s —— 池子恒定。
-
----
-
-## 10. 无声排查决策树
+## 10. 无声 / 卡顿排查决策树
 
 现象：耳机连上、ASE 显示 STREAMING，但没声音。
 
@@ -409,28 +382,30 @@ vendor 命令发芯片，每包回一条 CC（计数器 +319/条）→ 芯片真
    └─ 有 → UART 掩码未放行 type 5 → 查 0x503d8 补丁是否在（根因 1a）
 
 4. __fortify_fatal <- snprintf ?
-   └─ 有 → shim hexdump 溢出 → 换 v3.14（根因 4）
+   └─ 有 → shim hexdump 溢出 → 用当前源码重新构建 shim（根因 4）
 
 5. remove_iso_data_path: No such iso connection: 0xffff ?
    └─ 有 → ISO RX 蹦桌未生效 → 查 0x3bdec 补丁 + vtable 0x80 槽（根因 1c / 2）
 
 6. ASE 全 IDLE / handle 65535 + StartStream: current state: IDLE ?
-   └─ 协商没成功 → 查 PACS 能力 / codec 配置 / 码率是否 ≤155B（根因 8）
+   └─ 协商没成功 → 查 PACS 能力 / codec 配置
 
 7. invalid encoder config / btaudio_offload STOPPED ?
    └─ 走到了 offload 路径 → system.prop 没关 offload（根因 7）
 
 8. on_hci_timeout READ_CLOCK(0x1407) + UART err 0x51 + SSR，且起流后 ~2s 发生 ?
-   └─ 查 persist.vendor.leaudio.ncpsynth 是否为 0（根因 9）；strip4 也应为 0（根因 8 更正）
+   └─ 查 persist.vendor.leaudio.ncpsynth 是否为 0（根因 9）；strip4 也应为 0（根因 8）
 
-9. 不崩但 dropping ISO packet ~50/s → 吞吐上限 150/s（根因 9.1），需 shim credit 代理
+9. 不崩但卡顿 / 丢包 → 看 isoproxy 统计行 inflight=x/N：
+   └─ N=3 → 仍在用原厂 00570 固件，固件 bind mount 没生效（根因 12、13）
+   └─ N=22 但 drop>0 → 新问题，抓 btsnoop 分析
 
 10. 以上全无 + 链路全通 + AudioFlinger 在写 → 真正需要人耳验证
 ```
 
 ---
 
-## 11. 硬件 offload（已判死路）之外的第二条音频 HAL 死路：录音元数据污染场景
+## 11. 录音元数据残留 → 听音乐也走 LIVE 双向场景
 
 **现象**：听音乐时 `Current scenario: LIVE`、`Recording metadata context type mask: 0x0040`、
 每个耳机的 source ASE 也在 STREAMING —— 耳机麦克风全程陪跑，白白拖长 CIG 事件。
@@ -444,7 +419,7 @@ vendor 命令发芯片，每包回一条 CC（计数器 +319/条）→ 芯片真
    —— **"0 tracks"（录音结束）的上报被 HAL 静默丢弃**，栈的
    `local_decoding_context_types_` 永远停在 LIVE。
 3. 栈自己的 workaround（`client.cc` VBC close timeout + `audio_hal_is_capable_to_send_empty_metadata_`）
-   依赖 `leaudio_use_context_type_manager` flag 的一组时序，在本机上没有触发（日志实测
+   依赖 `leaudio_use_context_type_manager` flag 的一组时序，在本设备上没有触发（日志实测
    `local_decoding_context_types_` 数分钟仍是 0x0040）。
 
 **修复**：模块内 `audio.bluetooth.default.so` 把
@@ -456,9 +431,9 @@ vendor 命令发芯片，每包回一条 CC（计数器 +319/条）→ 芯片真
 **首次补丁翻车记录**：把入口 `paciasp` 改成 `ret` → 音频 HAL 每次开 BLE 输入都
 `SIGILL (ILL_ILLOPC)`（paciasp 同时是 BTI 落点），crash loop ~15 次后热修复，未重启设备。
 
-## 12. 终局根因（历史阶段结论）：旧固件 3 缓冲 × 2 周期流水线 = 150/s 硬上限
+## 12. 固件 00570：3 缓冲 × 2 周期流水线 = 150/s 硬上限
 
-**测量（shim 内打点，2026-10-06 15:53，旧固件 00570，maxrtn=-1）**：
+**测量（shim 内打点，旧固件 00570，maxrtn=-1）**：
 
 ```
 hold(send->NCP) avg=19880us max=24936us n=750, send call avg=128us
@@ -476,16 +451,16 @@ hold(send->NCP) avg=19880us max=24936us n=750, send call avg=128us
    - 上游最新版本：`BTFW.HSP.2.1.0-00680-VER_PATCHZ-1`（163,332 B）
    跨越 110+ 个高通内部 changeset，天然附带高通官方 RSA 签名，芯片 ROM 顺利通过验签。
 
-**实测结果（2026-10-06 16:53，MEDIA 48_4 High Reliability）**：
+**实测结果（MEDIA 48_4 High Reliability）**：
 - 芯片 `0x2060 (LE Read Buffer Size v2)` 真实返回：**22 个 ISO 缓冲区**（原厂为 3 个）！
 - 双耳同时 STREAMING 40+ 秒持续统计：
   ```
   isoproxy: enq=8008 sent=8007 drop=0 ncp=7996 acked=8006 inflight=11/22 maxq=1
   ```
 - **速率精准恒定 200.0 包/秒，丢包恒 0**；在飞 11 个缓冲（富余 11 个，50% 冗余）；队列深度 1（无排队延迟）。
-- **用户实测听感**：完全消除卡顿、爆音和毛刺，双耳音质完美。
+- **实测听感**：完全消除卡顿、爆音和毛刺，双耳音质完美。
 
 **持久化落地**：
 - 将固件存入模块目录 `$MODDIR/firmware/hpbtfw21.tlv`。
-- 在 `$MODDIR/post-fs-data.sh` 中通过 `mount -o bind` 将其覆盖到 `/vendor/bt_firmware/image/hpbtfw21.tlv`（系统分区零写入，符合红线要求）。
+- 在 `$MODDIR/post-fs-data.sh` 中通过 `mount -o bind` 将其覆盖到 `/vendor/bt_firmware/image/hpbtfw21.tlv`（系统分区零写入）。
 - 开机时在 Bluetooth HAL 启动前自动挂载生效，重启完全自愈。
