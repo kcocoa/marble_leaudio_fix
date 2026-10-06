@@ -2,10 +2,22 @@
 *.so
 *.o
 *.zip
+*.tlv
+*.bin
+*.img
+*.log
+*.csv
+*.png
 bluetooth_hci_shim/android.hardware.bluetooth@*
 
-# 监测原始数据体积大；只保留 summary.txt / events.txt / samples.csv
-monitor_runs/*/logcat.txt
-monitor_runs/*/snapshots/
+# 手机侧内容一律不入库：
+# - monitor_runs/   logcat 衍生数据（含全量设备日志）
+# - firmware_dump/  原厂固件/ NV 抓取
+# - viz/            由手机日志渲染的可视化
+# - 设备提取的 vendor XML/JSON（audio_policy / vintf manifest / apex le_audio json）
+monitor_runs/
 firmware_dump/
 viz/
+leaudio_marble_fix_v2/vendor/etc/audio/
+leaudio_marble_fix_v2/vendor/etc/vintf/
+leaudio_marble_fix_v2/vendor/etc/bluetooth/

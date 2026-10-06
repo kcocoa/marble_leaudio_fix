@@ -17,16 +17,17 @@
 
 
 ```
-bluetooth_hci_shim/BluetoothHciHook.cpp   核心：QTI HAL 的 HIDL 1.1 shim（v3.10）
+bluetooth_hci_shim/BluetoothHciHook.cpp   核心：QTI HAL 的 HIDL 1.1 shim（v4.1，★ 库内唯一源码）
 bluetooth_hci_shim/BluetoothHciShim.cpp   早期尝试（已被 HciHook 取代）
-leaudio_marble_fix_v2/                    KernelSU 模块（system.prop / 音频策略 / VINTF）
+leaudio_marble_fix_v2/                    KernelSU 模块（仅文本：system.prop / post-fs-data / service / codec XML；
+                                          二进制与设备提取的 vendor XML/JSON 一律不入库，见 .gitignore）
 leaudio_iterate.sh                        部署 / 回滚 / 监测 / 音乐测试 / 状态
 leaudio_monitor.sh                        事件触发式全量快照监测器
 leaudio_monitor_analyze.py                监测数据分析器（崩溃时间线 + 速率 + 关联）
 deploy_shim.sh                            整模块部署
 TODO.md                                   累积的调查记录（含 bootloop 事故复盘）
 LEAUDIO_MARBLE_INVESTIGATION.md           早期调查笔记
-monitor_runs/                             历史采集（只保留 summary/events，原始 logcat 已忽略）
+monitor_runs/                             手机日志衍生数据，已移出仓库（.gitignore 排除）
 docs/                                     ★ 现行文档（先读这里）
   README.md                               索引 + 当前状态一页纸
   architecture.md                         三层架构 / 五种修改手段 / 构建配方 / ABI 硬知识

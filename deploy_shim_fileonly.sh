@@ -18,7 +18,7 @@
 #     running HAL has mmapped: its code changes underneath it and it SIGSEGVs
 #     inside the shim (seen 2026-10-06, tombstone pc in impl-qti.so).
 set -e
-SER=${SER:-$SERIAL}
+SER="${SER:-${SERIAL:?export SERIAL=<你的序列号>}}"
 MOD=/data/adb/modules/leaudio_marble_fix
 HW=$MOD/vendor/lib64/hw
 SRC=${1:-/tmp/leaudio_build/shim_v41.so}

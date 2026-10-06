@@ -1,6 +1,6 @@
 # LE Audio on marble — 文档索引
 
-设备：Redmi Note 12 Turbo (`marble`)，LineageOS 23.2 / Android 16，KernelSU，序列号 `$SERIAL`
+设备：Redmi Note 12 Turbo (`marble`)，LineageOS 23.2 / Android 16，KernelSU，序列号 `$SERIAL`（本地环境变量注入，不入库）
 耳机：ROSELINK / `XX:XX:XX:XX:XX:XX`（LE Audio Unicast，CSIP 双耳组，LC3，Bluetrum 主控）
 
 ## 文档地图
@@ -57,23 +57,22 @@
 ├── system.prop                          # 软件模式 + shim 开关
 ├── post-fs-data.sh                      # 开机自动 bind-mount 官方 00680 固件到 /vendor/bt_firmware
 ├── service.sh                           # 兜底确保固件 mount 正常
-├── firmware/
-│   └── hpbtfw21.tlv                     # 高通官方 00680 固件（22 ISO buffers，带高通官方签名）
 └── vendor/
-    ├── lib64/hw/
+    ├── lib64/hw/                        # ⚠ 手机侧二进制，不入库
     │   ├── android.hardware.bluetooth@1.0-impl-qti.so   # shim（SONAME 继承原名）
     │   ├── libbluetooth_qti_real.so                      # 原厂真实 HAL（已打 4 处二进制补丁）
     │   └── audio.bluetooth.default.so                    # SessionType 补丁 + 录音元数据禁用补丁
     ├── etc/
-    │   ├── vintf/manifest_ukee.xml                       # @1.1 声明（唯一活动 SKU manifest）
-    │   ├── le_audio_codec_capabilities.xml
-    │   ├── bluetooth/le_audio/audio_set_configurations.json   # ⚠ 栈不读（apex 内置），死文件
-    │   └── audio/
-    │       ├── sku_ukee/{audio_policy_configuration.xml,resourcemanager_ukee_mtp.xml}
-    │       └── sku_taro/audio_policy_configuration.xml
+    │   ├── vintf/manifest_ukee.xml                       # @1.1 声明（设备提取，不入库）
+    │   ├── le_audio_codec_capabilities.xml               # 本机手写（AOSP schema）
+    │   ├── bluetooth/le_audio/audio_set_configurations.json   # ⚠ 栈不读（apex 内置），死文件（设备提取，不入库）
+    │   └── audio/                                        # sku_ukee/sku_taro（设备提取，不入库）
 ```
 
 `ro.boot.product.vendor.sku=ukee` → 活动主 manifest 是 `manifest_ukee.xml`。
+
+> 注：手机侧二进制、固件与设备提取的 vendor 配置只存在于本机工作区与设备侧，
+> 仓库不跟踪（见 `.gitignore`）。
 
 设备侧备份：`/data/local/tmp/shim_v314_backup.so`（v3.14）、
 `/data/local/tmp/audio.bluetooth.default.so.bak_20261006`（音频 HAL 原厂）、
@@ -81,34 +80,36 @@
 
 ## 关键 md5
 
+> 专有二进制（固件 / 厂商 `.so` / 设备提取 XML）已全部移出仓库，此处只列库内文本文件。
+> 二进制指纹按需在设备侧 `md5sum` 现场核对，不落入历史。
+
 | 文件 | md5 |
 |---|---|
-| `firmware/hpbtfw21.tlv`（00680 固件） | `9a6b0cb34a82a7015141dd19b2d779da`（163332B） |
-| 原厂 `hpbtfw21.tlv`（00570 固件） | `fac75b203eb19dec5ae026a0e72c7be0`（146068B） |
-| shim v4.1 | `45bb1e5abd713ce2125819f216bde24f` |
-| `audio.bluetooth.default.so`（补丁后） | `9769dbee5e5a16d8c2486527f43fc6a1` |
-| `audio.bluetooth.default.so` 原厂 | `1b96c8421c91338f2bc3841ae5cd4f45` |
-| `system.prop`（ncpsynth=0, strip4=0） | `25a73fe10faca1b64b307c06b440084d` |
-| `manifest_ukee.xml` | `d600c9c552af2ccae0d0eb3461f40ac1`（12136B） |
-| `libbluetooth_qti_real.so`（4 补丁） | `ce7fed1c…` |
+| `leaudio_marble_fix_v2/system.prop`（ncpsynth=0, strip4=0） | `25a73fe10faca1b64b307c06b440084d` |
 
 ## git 提交索引
 
-仓库 `./`，身份 `pi-agent <pi.dev>`。
+仓库身份 **`kcocoa <kcocoa410@hotmail.com>`**（`git config user.*` 已设）。
 
-| commit | 内容 |
+> ⚠️ **2026-10-06 历史已用 `git filter-repo` 全量重写**：设备序列号、耳机 MAC、
+> 本机绝对路径/用户名已从所有提交中剔除，手机侧二进制与日志衍生文件已从历史移除，
+> 因此**旧 commit 哈希全部失效**，下表不再按哈希索引，改用里程碑描述。
+> 逐条提交的完成方署名见每条 commit message 末尾的 `Tool:` trailer：
+> `Step 5 Preview & Gemini 3.8 Flash`（v4 之前）｜ `Claude Opus 5.5`（v4.x）｜
+> `Step 5 Preview`（脱敏重写及其后）。
+
+| 里程碑 | 内容 |
 |---|---|
-| `1b1c695` / `cd96586` | 硬件 Offload 逆向与死路结论归档 |
-| `7433698` | VINTF @1.1 标准格式（`<version>1.1</version>`+`<interface>`） |
-| `1cc6b00` | libvintf 五种写法实测结论 |
-| `94125d6` | v3.14 修 shim hexdump 溢出 |
-| `53df581` | VINTF 改合并式单 `<hal>` 块（已被 `7433698` 取代） |
-| `8157d3c` | deploy 脚本禁用 `adb push` 直推、改用 `chcon` |
-| `aebec53` | 新增 `deploy_shim_fileonly.sh`，弃用 bind mount 版 |
+| 初始化 | 工作仓库 + BluetoothHciHook v3.10（QTI HAL HIDL 1.1 shim） |
+| 模块 v2 | leaudio_marble_fix_v2 KernelSU 模块配置（system.prop / 音频策略 / VINTF） |
+| 工具 | 部署迭代脚本 + 事件触发式监测器 + ISO RX 蹦桌补丁生成器 |
+| v3.11–v3.14 | framed-SDU 剥离、hexdump 溢出修复、RX ISO 通路补齐、部署 SELinux 规则 |
+| docs 重组 | 整理为 docs/ 五篇现行文档 |
+| v4.x | ISO credit 代理 + CIG max-latency 截断、录音元数据静音、官方 00680 固件 bind-mount、终局结论 |
 
 ## 下一步
 
 1. **项目目标全部达成**：双耳 LE Audio 稳定推流、48kHz LC3 音乐、零丢包、零破音、人耳验收通过
 2. 模块已持久化（`post-fs-data.sh` 自动 bind-mount 官方 00680 固件），重启自愈
 3. 如需测试设备重启后的持久化：须先提醒用户并取得确认（用户输入锁屏密码）
-4. 仓库变更提交：新固件、post-fs-data/service 脚本、module.prop 与全部文档更新
+4. 仓库状态：历史已脱敏重写（filter-repo），手机侧内容不入库；后续提交沿用本身份与 `Tool:` 署名

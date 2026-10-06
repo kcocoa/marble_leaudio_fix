@@ -12,7 +12,7 @@
 # 环境要求: 设备 $SERIAL 在线且已解锁; 模块 leaudio_marble_fix enabled (自动检查)
 set -u
 
-SERIAL="$SERIAL"
+SERIAL="${SERIAL:?export SERIAL=<你的设备序列号>}"
 ADB="adb -s $SERIAL"
 MODULE_ID="leaudio_marble_fix"
 MODULE_SO="/data/adb/modules/$MODULE_ID/vendor/lib64/hw/android.hardware.bluetooth@1.0-impl-qti.so"

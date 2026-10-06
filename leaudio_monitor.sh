@@ -15,7 +15,7 @@
 #   summary.txt         分析报告
 #
 set -u
-ADB="adb -s $SERIAL"
+ADB="adb -s ${SERIAL:?export SERIAL=<你的设备序列号>}"
 DUR="${1:-900}"
 OUT="$HOME/workspace.android/leaudio/monitor_runs/monitor_$(date +%m%d_%H%M%S)"
 mkdir -p "$OUT/snapshots"

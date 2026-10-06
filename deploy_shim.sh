@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-DEVICE_SERIAL="$SERIAL"
+DEVICE_SERIAL="${SERIAL:?export SERIAL=<你的设备序列号>}"
 
 echo "=== LE Audio Shim Deployment Tool for marble ==="
 
