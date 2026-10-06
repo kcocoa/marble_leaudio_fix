@@ -191,7 +191,8 @@ constexpr const char* kBaseDescriptor = "android.hidl.base@1.0::IBase";
 // needs 100 SDU/s. We hook hciEventReceived on the callbacks wrapper and
 // multiply the "Number of Completed Packets" count for ISO handles, letting
 // the stack keep a deeper in-flight pipeline.
-// Runtime knob: persist.vendor.leaudio.isocred.mult (default 6; 1 = disabled)
+// Runtime knob: persist.vendor.leaudio.isocred.mult (default 1 = off; multiplying
+// NCPs underflows the stack's credit accounting, see docs/dead-ends.md)
 // ---------------------------------------------------------------------------
 static int GetIsoCreditMult() {
     char v[PROP_VALUE_MAX] = {0};

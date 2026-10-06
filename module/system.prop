@@ -13,8 +13,9 @@ ro.bluetooth.leaudio_offload.supported=false
 # BluetoothHciHook shim 配置：
 # 1. patchring: 运行时修复 QTI 环形缓冲区拒绝 ISO 包（type 5）的 bug
 persist.vendor.leaudio.iso.patchring=1
-# 2. ncpsynth: 必须为 0。控制器只有 3 个 ISO 缓冲（LE Read Buffer Size v2），
-#    且真实 NCP 会 1:1 回传；合成 NCP 会让栈超发 → 控制器挂死 → SSR → 蓝牙崩溃
+# 2. ncpsynth: 必须为 0。控制器的 ISO 缓冲有限（原厂固件 00570 只有 3 个，
+#    上游 00680 为 22 个，见 LE Read Buffer Size v2），且真实 NCP 会 1:1 回传；
+#    合成 NCP 会让栈超发 → 控制器挂死 → SSR → 蓝牙崩溃
 persist.vendor.leaudio.ncpsynth=0
 # 3. isocred.window: 动态信用窗口大小（维持协议栈持续供流）
 persist.vendor.leaudio.isocred.window=12

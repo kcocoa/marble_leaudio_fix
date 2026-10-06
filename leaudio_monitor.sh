@@ -15,9 +15,10 @@
 #   summary.txt         分析报告
 #
 set -u
+HERE="$(cd "$(dirname "$0")" && pwd)"
 ADB="adb -s ${SERIAL:?export SERIAL=<你的设备序列号>}"
 DUR="${1:-900}"
-OUT="$HOME/workspace.android/leaudio/monitor_runs/monitor_$(date +%m%d_%H%M%S)"
+OUT="$HERE/monitor_runs/monitor_$(date +%m%d_%H%M%S)"
 mkdir -p "$OUT/snapshots"
 echo "[+] 输出: $OUT  时长 ${DUR}s"
 
@@ -112,4 +113,4 @@ wait 2>/dev/null
 $ADB shell "su -c 'ls -t /data/tombstones/ 2>/dev/null | grep -v pb | head -12'" > "$OUT/tombstones_recent.txt" 2>/dev/null
 
 echo "[+] 采集完成：$SNAP_N 份快照"
-python3 "$HOME/workspace.android/leaudio/leaudio_monitor_analyze.py" "$OUT"
+python3 "$HERE/leaudio_monitor_analyze.py" "$OUT"

@@ -44,6 +44,8 @@ script="$(mktemp)"
 trap 'rm -f "$script"' EXIT
 {
   echo "set -e"
+  # 上一次安装中断留下的临时文件
+  echo "find '$DST' -name '*.new' -delete 2>/dev/null || true"
   for f in "${FILES[@]}"; do
     case "$f" in *.sh) mode=755 ;; *) mode=644 ;; esac
     echo "mkdir -p '$DST/$(dirname "$f")'"

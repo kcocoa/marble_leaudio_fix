@@ -32,7 +32,6 @@ import sys
 
 TRAMPOLINE_OFF = 0x3BDEC   # start of the error block (replaced)
 TRAMPOLINE_LEN = 0x24      # 0x3be10 - 0x3bdec = 36 bytes = 9 instructions
-EVT_PATH = 0x3BB4C         # type-4 path (pattern source, not a target here)
 CLEANUP   = 0x3BE10        # shared epilogue (canary check + restore + ret)
 
 # --- v3.12 static RX patches (must be applied to the same file) ------------

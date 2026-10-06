@@ -1,11 +1,11 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Deploy the shim by FILE REPLACEMENT ONLY (no mount -o bind).
 #
-# Two hard-won rules baked in here:
+# Three hard-won rules baked in here:
 #  1. NEVER use `adb push` into /data/adb/modules/. adb push stamps the file
-#     with the `adb_data_file` SELinux label, and KernelSU magic mount carries
-#     that label into /vendor verbatim. hal_bluetooth_default is NOT allowed to
-#     { map } an adb_data_file, so the HAL dies with:
+#     with the `adb_data_file` SELinux label, and the metamodule that mounts the
+#     module files carries that label into /vendor verbatim. hal_bluetooth_default
+#     is NOT allowed to { map } an adb_data_file, so the HAL dies with:
 #       avc: denied { map } ... path=".../android.hardware.bluetooth@1.0-impl-qti.so"
 #       scontext=u:r:hal_bluetooth_default:s0 tcontext=u:object_r:adb_data_file:s0
 #     and the stack then aborts in hci_backend_hidl.cc:110

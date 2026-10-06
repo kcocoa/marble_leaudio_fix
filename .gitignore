@@ -9,17 +9,15 @@
 *.csv
 *.png
 *.so.*
-*.orig.bak
 bluetooth_hci_shim/android.hardware.bluetooth@*
 
 # 手机侧内容一律不入库：
 # - monitor_runs/   logcat 衍生数据（含全量设备日志）
 # - dump/           dump_device_binaries.sh --all 的取证产物
 # - build/          shim 构建前置（设备 so + 头文件）与产物
-# - 设备提取的 vendor XML/JSON（audio_policy / vintf manifest / apex le_audio json）
+# - 设备提取的 vendor XML（audio_policy / vintf manifest）
 monitor_runs/
 dump/
 build/
 module/vendor/etc/audio/
 module/vendor/etc/vintf/
-module/vendor/etc/bluetooth/

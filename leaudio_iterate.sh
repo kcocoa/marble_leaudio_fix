@@ -6,7 +6,7 @@
 #   ./leaudio_iterate.sh restart               # 只重启 HAL 服务 + 健康监测
 #   ./leaudio_iterate.sh rollback              # 回退到上次部署前的备份 (LKG)
 #   ./leaudio_iterate.sh watch [秒]            # 实时观测 BluetoothHciHook 日志 + 到期摘要
-#   ./leaudio_iterate.sh musictest [mults] [秒/档] # 自动播放+mult 扫描+丢帧/速率对比
+#   ./leaudio_iterate.sh musictest [秒数]       # 自动播放 + 连续采样（流/路由/丢帧/速率）
 #   ./leaudio_iterate.sh status                # 只读状态总览
 #
 # 环境要求: 设备 $SERIAL 在线且已解锁; 模块 leaudio_marble_fix enabled (自动检查)
@@ -61,6 +61,13 @@ route_state(){
 # 活跃播放器数 (state:started)
 active_players(){ $ADB shell "dumpsys audio" 2>/dev/null | grep -a "AudioPlaybackConfiguration" | grep -ac "state:started"; }
 get_credits(){ $ADB shell "dumpsys bluetooth_manager" 2>/dev/null | grep -a 'Available credits' | head -1 | grep -o '[0-9]*'; }
+# logcat 时间戳 "MM-DD HH:MM:SS.mmm" -> 秒数（只用于求时间差）
+parse_ts() {
+    awk -v d="$1" -v t="$2" 'BEGIN{
+        split(d, a, "-"); split(t, b, ":");
+        printf "%.3f", ((a[1] * 31 + a[2]) * 24 + b[1]) * 3600 + b[2] * 60 + b[3]
+    }'
+}
 # 恢复播放: 重启蓝牙后音乐会暂停; 每 3s 重试 dispatch play 直到 STREAMING
 resume_play() {
     local tries="${1:-10}" i
@@ -241,14 +248,14 @@ do_status() {
     $ADB shell "logcat -d -s $LOGTAG" | grep -E "init \(|transact hook installed|dh=|NCP mult|evt parcel|sendIsoData|SECOND" | tail -8
 }
 
-# ---------------- 自动音乐测试 (mult 扫描 + 连续采样) ----------------
-# 用法: musictest [mult列表] [每档秒数]
-# 每档连续采样(每5s): 流在线/路由(耳机vs扬声器)/credits; 结束统计丢帧、速率、合成NCP
+# ---------------- 自动音乐测试（连续采样）----------------
+# 用法: musictest [秒数]
+# 自动恢复播放后连续采样(每5s): 流在线/路由(耳机vs扬声器)/credits; 结束统计丢帧与速率。
+# 不再扫 isocred.mult —— 放大 NCP 会让协议栈 credit 下溢（见 docs/dead-ends.md 第 3 节）。
 do_musictest() {
     check_device
-    local mults="${1:-1}"
-    local secs="${2:-30}"
-    info "自动音乐测试: mult ∈ {$mults}, 每档 ${secs}s (连续采样每 5s)"
+    local secs="${1:-30}"
+    info "自动音乐测试: ${secs}s (连续采样每 5s)"
 
     # 尝试自动恢复/开始播放 (重启蓝牙后音乐暂停: 每 3s 重试 dispatch play 直到恢复)
     if ! resume_play 10; then
@@ -256,56 +263,45 @@ do_musictest() {
         read -r
     fi
     if ! is_streaming; then fail "未进入 STREAMING 状态, 终止"; exit 1; fi
-    info "STREAMING 确认, 开始扫描…"
+    info "STREAMING 确认, 开始采样…"
 
-    local m
-    printf "%-6s %-7s %-7s %-8s %-8s %-10s %s\n" "mult" "流在线%" "路由耳%" "credits" "丢帧" "iso pkt/s" "备注"
-    for m in ${mults//,/ }; do
-        $ADB shell "su -c 'setprop persist.vendor.leaudio.isocred.mult $m'" >/dev/null
-        sleep 2
-        if ! is_streaming; then
-            info "mult=$m: 流已断, 恢复播放 (3s 间隔重试)…"
-            resume_play 6 || { warn "mult=$m: 无法恢复流, 跳过"; continue; }
-        fi
-        $ADB shell "logcat -c" 2>/dev/null
-        # 连续采样
-        local samples=0 s_ok=0 r_ble=0 r_spk=0 cred_sum=0 cred_n=0
-        local end=$((SECONDS + secs))
-        while [ $SECONDS -lt $end ]; do
-            sleep 5
-            samples=$((samples+1))
-            is_streaming && s_ok=$((s_ok+1))
-            rt=$(route_state)
-            [ "$rt" = ble ] && r_ble=$((r_ble+1))
-            [ "$rt" = spk ] && r_spk=$((r_spk+1))
-            local cr; cr=$(get_credits); [ -n "$cr" ] && { cred_sum=$((cred_sum+cr)); cred_n=$((cred_n+1)); }
-        done
-        # 统计
-        local log drops rate firstN lastN firstT lastT t0 t1 ncp_cnt
-        log=$($ADB shell "logcat -d" 2>/dev/null)
-        drops=$(echo "$log" | grep -ac 'dropping ISO')
-        ncp_cnt=$(echo "$log" | grep -ac 'CC1407→NCP')
-        rate="-"
-        firstN=$(echo "$log" | grep -a 'sendIsoData: forwarded' | head -1 | grep -o 'pkt #[0-9]*' | grep -o '[0-9]*')
-        lastN=$(echo "$log" | grep -a 'sendIsoData: forwarded' | tail -1 | grep -o 'pkt #[0-9]*' | grep -o '[0-9]*')
-        firstT=$(echo "$log" | grep -a 'sendIsoData: forwarded' | head -1 | awk '{print $1, $2}')
-        lastT=$(echo "$log" | grep -a 'sendIsoData: forwarded' | tail -1 | awk '{print $1, $2}')
-        if [ -n "$firstN" ] && [ -n "$lastN" ] && [ "$firstN" != "$lastN" ]; then
-            t0=$(parse_ts $firstT); t1=$(parse_ts $lastT)
-            [ -n "$t0" ] && [ -n "$t1" ] && rate=$(awk -v a=$lastN -v b=$firstN -v x=$t1 -v y=$t0 'BEGIN{printf "%.1f", (a-b)/(x-y)}')
-        fi
-        local up="-" rb="-" ca="-" note=""
-        if [ $samples -gt 0 ]; then
-            up=$((s_ok*100/samples))
-            rb=$((r_ble*100/samples))
-            [ $((samples-s_ok)) -gt 0 ] && note="流断$((samples-s_ok))次采样"
-        fi
-        [ $cred_n -gt 0 ] && ca=$((cred_sum/cred_n))
-        [ "$r_spk" -gt 0 ] && note="$note 有${r_spk}次采样路由到扬声器!"
-        printf "%-6s %-7s %-7s %-8s %-8s %-10s %s\n" "$m" "${up}%" "${rb}%" "$ca" "$drops" "${rate}" "$note"
+    $ADB shell "logcat -c" 2>/dev/null
+    local samples=0 s_ok=0 r_ble=0 r_spk=0 cred_sum=0 cred_n=0 rt cr
+    local end=$((SECONDS + secs))
+    while [ $SECONDS -lt $end ]; do
+        sleep 5
+        samples=$((samples+1))
+        is_streaming && s_ok=$((s_ok+1))
+        rt=$(route_state)
+        [ "$rt" = ble ] && r_ble=$((r_ble+1))
+        [ "$rt" = spk ] && r_spk=$((r_spk+1))
+        cr=$(get_credits); [ -n "$cr" ] && { cred_sum=$((cred_sum+cr)); cred_n=$((cred_n+1)); }
     done
-    $ADB shell "su -c 'setprop persist.vendor.leaudio.isocred.mult 1'" >/dev/null
-    info "已恢复 mult=1 (合成 NCP 路径不使用 mult)"
+
+    # 统计
+    local log drops rate firstN lastN firstT lastT t0 t1
+    log=$($ADB shell "logcat -d" 2>/dev/null)
+    drops=$(echo "$log" | grep -ac 'dropping ISO')
+    rate="-"
+    firstN=$(echo "$log" | grep -a 'sendIsoData: forwarded' | head -1 | grep -o 'pkt #[0-9]*' | grep -o '[0-9]*')
+    lastN=$(echo "$log" | grep -a 'sendIsoData: forwarded' | tail -1 | grep -o 'pkt #[0-9]*' | grep -o '[0-9]*')
+    firstT=$(echo "$log" | grep -a 'sendIsoData: forwarded' | head -1 | awk '{print $1, $2}')
+    lastT=$(echo "$log" | grep -a 'sendIsoData: forwarded' | tail -1 | awk '{print $1, $2}')
+    if [ -n "$firstN" ] && [ -n "$lastN" ] && [ "$firstN" != "$lastN" ]; then
+        t0=$(parse_ts $firstT); t1=$(parse_ts $lastT)
+        [ -n "$t0" ] && [ -n "$t1" ] && rate=$(awk -v a=$lastN -v b=$firstN -v x=$t1 -v y=$t0 'BEGIN{printf "%.1f", (a-b)/(x-y)}')
+    fi
+    local up="-" rb="-" ca="-" note=""
+    if [ $samples -gt 0 ]; then
+        up=$((s_ok*100/samples))
+        rb=$((r_ble*100/samples))
+        [ $((samples-s_ok)) -gt 0 ] && note="流断$((samples-s_ok))次采样"
+    fi
+    [ $cred_n -gt 0 ] && ca=$((cred_sum/cred_n))
+    [ "$r_spk" -gt 0 ] && note="$note 有${r_spk}次采样路由到扬声器!"
+
+    printf "%-7s %-7s %-8s %-8s %-10s %s\n" "流在线%" "路由耳%" "credits" "丢帧" "iso pkt/s" "备注"
+    printf "%-7s %-7s %-8s %-8s %-10s %s\n" "$up%" "$rb%" "$ca" "$drops" "$rate" "$note"
 }
 
 case "${1:-}" in
@@ -313,7 +309,7 @@ case "${1:-}" in
     restart) do_restart;;
     rollback) do_rollback;;
     watch)   do_watch "${2:-60}";;
-    musictest) do_musictest "${2:-1,6,12,24}" "${3:-30}";;
+    musictest) do_musictest "${2:-30}";;
     status)  do_status;;
     *) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 1;;
 esac

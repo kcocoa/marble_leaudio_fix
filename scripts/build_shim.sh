@@ -5,7 +5,8 @@
 #   - Android NDK 30（clang 21，与设备平台同代；换版本踩 ABI tag 坑，见 docs/architecture.md §5）
 #   - build/lib/{libhidlbase,libutils,libc++}.so:
 #       SERIAL=<序列号> ./scripts/dump_device_binaries.sh --with-build-deps
-#   - build/inc/hidl/ConcurrentMap.h: 取自 AOSP system/libhidl/transport/include/hidl/
+#   - build/inc/hidl/ConcurrentMap.h: AOSP system/libhidl/transport/include/hidl/
+#       （缺失时自动从 android.googlesource.com 下载；可用 AOSP_REF 指定分支/tag）
 #   - module/vendor/lib64/hw/libbluetooth_qti_real.so（已打补丁，见 patch_hal_binaries.sh）
 #   build/inc/__config_site 缺失时自动从 NDK 生成。
 #
@@ -34,6 +35,29 @@ done
 T="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
 [ -x "$T/clang++" ] || { echo "[x] NDK 工具链不可用: $NDK"; exit 1; }
 
+# AOSP 的 ConcurrentMap.h 没有现成镜像，缺了就直接从 googlesource 取（base64）。
+# 该文件只依赖 <mutex>/<map>，在 Android 13–16 与 main 上内容完全相同，
+# 所以不跟着设备版本走；需要固定版本时用 AOSP_REF=refs/tags/android-16.0.0_r1。
+fetch_concurrentmap() {
+  local dst="$B/inc/hidl/ConcurrentMap.h" raw tmp url get
+  if command -v curl >/dev/null; then get="curl -fsSL"; else get="wget -qO-"; fi
+  mkdir -p "$(dirname "$dst")"
+  raw="$(mktemp)"; tmp="$dst.tmp"
+  for ref in "${AOSP_REF:-refs/heads/main}" refs/tags/android-16.0.0_r1; do
+    url="https://android.googlesource.com/platform/system/libhidl/+/$ref/transport/include/hidl/ConcurrentMap.h?format=TEXT"
+    echo "[*] 下载 AOSP 头文件: $ref"
+    $get "$url" > "$raw" 2>/dev/null || continue
+    { base64 -d "$raw" 2>/dev/null || base64 -D "$raw" 2>/dev/null; } > "$tmp"
+    if grep -q 'class ConcurrentMap' "$tmp"; then
+      mv "$tmp" "$dst"; rm -f "$raw"
+      echo "[✓] $dst  (md5 $(md5sum "$dst" | cut -d' ' -f1))"
+      return 0
+    fi
+  done
+  rm -f "$raw" "$tmp"
+  return 1
+}
+
 # __config_site: NDK 默认 ABI 命名空间 __ndk1，设备 libc++ 只有 std::__1（-D 覆盖无效）
 if [ ! -f "$B/inc/__config_site" ]; then
   mkdir -p "$B/inc"
@@ -43,6 +67,8 @@ if [ ! -f "$B/inc/__config_site" ]; then
 fi
 
 missing=0
+[ -f "$B/inc/hidl/ConcurrentMap.h" ] || fetch_concurrentmap ||
+  echo "[!] 自动下载失败，请手工放置 $B/inc/hidl/ConcurrentMap.h" >&2
 for f in "$B/inc/hidl/ConcurrentMap.h" "$B/lib/libhidlbase.so" "$B/lib/libutils.so" \
          "$B/lib/libc++.so" "$HW/libbluetooth_qti_real.so"; do
   [ -e "$f" ] || { echo "[x] 缺 $f" >&2; missing=1; }
