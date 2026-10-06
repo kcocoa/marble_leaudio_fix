@@ -7,3 +7,5 @@ bluetooth_hci_shim/android.hardware.bluetooth@*
 # 监测原始数据体积大；只保留 summary.txt / events.txt / samples.csv
 monitor_runs/*/logcat.txt
 monitor_runs/*/snapshots/
+firmware_dump/
+viz/

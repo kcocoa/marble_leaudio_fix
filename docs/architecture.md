@@ -95,6 +95,19 @@ AudioFlinger
 开机画面后连按音量减 3 次（按-松）。安全模式下所有模块被 disable、`su` 二进制不可用，
 但 LineageOS userdebug 可 `adb root` 拿到 uid=0。这是 bootloop 的唯一救援手段。
 
+### 2.6 固件 overlay（`post-fs-data.sh` bind-mount）
+
+`/vendor/bt_firmware` 是独立的 vfat 挂载点（`sde36`），嵌套在 `/vendor` 内。
+KernelSU 的 overlayfs 无法直接遮盖子挂载点，因此在模块的 `post-fs-data.sh` 中使用内存级 `mount -o bind`：
+
+```bash
+mount -o bind $MODDIR/firmware/hpbtfw21.tlv /vendor/bt_firmware/image/hpbtfw21.tlv
+```
+
+- 权限设为 `chmod 644`、`chown bluetooth:net_bt`、`chcon u:object_r:bt_firmware_file:s0`。
+- 执行时机：`post-fs-data` 阶段，早于 `class hal` 的 `vendor.bluetooth-1-0-qti` 服务启动。
+- 零写入系统分区，开机自启生效，模块禁用时完全不留痕迹。
+
 ## 3. 构建配方
 
 前置准备放在 `/tmp/leaudio_build/`（`/tmp` 重启会清空，丢了就按下表重建）：

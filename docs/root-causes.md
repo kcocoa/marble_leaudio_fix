@@ -456,25 +456,36 @@ vendor 命令发芯片，每包回一条 CC（计数器 +319/条）→ 芯片真
 **首次补丁翻车记录**：把入口 `paciasp` 改成 `ret` → 音频 HAL 每次开 BLE 输入都
 `SIGILL (ILL_ILLOPC)`（paciasp 同时是 BTI 落点），crash loop ~15 次后热修复，未重启设备。
 
-## 12. 终局根因：固件 ISO 流水线每包占 2 个间隔 → 双耳 150/s 硬上限
+## 12. 终局根因（历史阶段结论）：旧固件 3 缓冲 × 2 周期流水线 = 150/s 硬上限
 
-**测量（shim 内打点，2026-10-06 15:53，maxrtn=-1）**：
+**测量（shim 内打点，2026-10-06 15:53，旧固件 00570，maxrtn=-1）**：
 
 ```
 hold(send->NCP) avg=19880us max=24936us n=750, send call avg=128us
 ```
 
-- `send call avg=128us`：HAL 的 `sendDataToController` 只入 ring，即时代回。
-- **每包从下发到 NCP 恒 ~19.9ms ≈ 2×10ms 间隔**，与 CIG 事件长度无关：
-  NSE=4/CSD 7.2ms、NSE=2/3.5ms、NSE=1/1.7ms 全部 150/s；即使补发时刻距下一 anchor
-  有 8ms 余量也一样（对齐类假设全部证伪）。
-- 结论：**控制器固件把 ISO SDU 流水线化到"下下个" CIS 事件**，每包占缓冲 ~20ms。
-  3 缓冲 × (1/0.02s) = **150 包/s**。双耳需 200/s（每 CIS 每包 1 帧不可降，
-  耳机 PAC `Max Codec Frames Per SDU = 1`），缺口恒 25%。
+- **每包从下发到 NCP 恒 ~19.9ms ≈ 2×10ms 间隔**，与 CIG 事件长度无关。
+- 3 缓冲 × (1/0.02s) = **150 包/s**。双耳需 200/s，缺口恒 25% 导致卡顿；单耳 100/s 满足。
 
-**推论**：单耳（1 CIS，需 100/s ≤ 150/s）满速无丢包 —— 与人耳实测一致；
-双耳在本固件上任何主机侧手段都无法满速。唯一出路是报告更多 ISO 缓冲/更短流水线的
-BT 固件（`/vendor/bt_firmware`，按红线不可写，只能换包）。
+## 13. 终局解决：升级高通官方 00680 固件（开放 22 ISO 缓冲）→ 双耳 200/s 满速零丢包
 
-**当前取舍**：v4.1 代理模式下丢包集中在 shim（每 handle 深度 qmax=4、丢最旧、延迟有界 ~40ms），
-栈侧零丢包、零 credit 抖动；关掉代理（`isoproxy=0`）则退回栈侧每 tick 丢包，听感无差别。
+**突破依据**：
+1. 逆向 `libbluetooth_qti_real.so` 的 `PatchDLManager::OpenPatchFile` 确认：固件加载在每次开蓝牙时从 `/vendor/bt_firmware/image/hpbtfw21.tlv` 读入 RAM 执行，**验签在芯片 ROM 里**，普通自制 patch 无法通过高通 RSA 验签。
+2. 检索官方 `linux-firmware.git` 发现高通开源工程师（`jinwang.li@oss.qualcomm.com`）于 2026-09-29 提交了最新的 QCA2066/WCN6855 固件：
+   - 手机出厂原版：`BTFW.HSP.2.1.0-00570-PATCHZ-1`（146,068 B）
+   - 上游最新版本：`BTFW.HSP.2.1.0-00680-VER_PATCHZ-1`（163,332 B）
+   跨越 110+ 个高通内部 changeset，天然附带高通官方 RSA 签名，芯片 ROM 顺利通过验签。
+
+**实测结果（2026-10-06 16:53，MEDIA 48_4 High Reliability）**：
+- 芯片 `0x2060 (LE Read Buffer Size v2)` 真实返回：**22 个 ISO 缓冲区**（原厂为 3 个）！
+- 双耳同时 STREAMING 40+ 秒持续统计：
+  ```
+  isoproxy: enq=8008 sent=8007 drop=0 ncp=7996 acked=8006 inflight=11/22 maxq=1
+  ```
+- **速率精准恒定 200.0 包/秒，丢包恒 0**；在飞 11 个缓冲（富余 11 个，50% 冗余）；队列深度 1（无排队延迟）。
+- **用户实测听感**：完全消除卡顿、爆音和毛刺，双耳音质完美。
+
+**持久化落地**：
+- 将固件存入模块目录 `$MODDIR/firmware/hpbtfw21.tlv`。
+- 在 `$MODDIR/post-fs-data.sh` 中通过 `mount -o bind` 将其覆盖到 `/vendor/bt_firmware/image/hpbtfw21.tlv`（系统分区零写入，符合红线要求）。
+- 开机时在 Bluetooth HAL 启动前自动挂载生效，重启完全自愈。
