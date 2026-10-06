@@ -31,7 +31,7 @@ scripts/patch_hal_binaries.sh        套 HAL 字节补丁（机器码经反汇�
 scripts/build_shim.sh                NDK30 一键编译 shim .so
 TODO.md                                   累积的调查记录（含 bootloop 事故复盘）
 LEAUDIO_MARBLE_INVESTIGATION.md           早期调查笔记
-monitor_runs/                             手机日志衍生数据，已移出仓库（.gitignore 排除）
+monitor_runs/                             不入库；本机亦不保留原始采集，按需用 leaudio_monitor.sh 重采
 docs/                                     ★ 现行文档（先读这里）
   README.md                               索引 + 当前状态一页纸
   architecture.md                         三层架构 / 五种修改手段 / 构建配方 / ABI 硬知识
