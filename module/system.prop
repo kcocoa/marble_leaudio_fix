@@ -6,19 +6,12 @@ bluetooth.profile.mcp.server.enabled=true
 bluetooth.profile.vcp.controller.enabled=true
 
 # LE Audio 软件编码（Host LC3）路径配置
-# 高通专有库（btaudio_offload_if.so + libar-pal.so）未实现 LE Audio 硬件 Offload，因此关闭 Offload，走软件模式
+# 高通专有库（btaudio_offload_if.so + lib-ar-pal.so）未实现 LE Audio 硬件 Offload，因此关闭 Offload，走软件模式
 persist.bluetooth.leaudio_offload.disabled=true
 ro.bluetooth.leaudio_offload.supported=false
 
-# BluetoothHciHook shim 配置：
-# 1. patchring: 运行时修复 QTI 环形缓冲区拒绝 ISO 包（type 5）的 bug
+# BluetoothHciHook shim 开关：
+# patchring 修复 QTI 环形缓冲区拒绝 ISO 包（type 5）的 bug，必须为 1。
+# 其余开关都有内建默认值，需要调时再 setprop（见 docs/architecture.md 第 4 节）：
+#   cig.maxlat = 10 ms  截断 Max_Transport_Latency，实测必要（不截会掉到 40 ms/84.57 ms 并丢首包）
 persist.vendor.leaudio.iso.patchring=1
-# 2. ncpsynth: 必须为 0。控制器的 ISO 缓冲有限（原厂固件 00570 只有 3 个，
-#    上游 00680 为 22 个，见 LE Read Buffer Size v2），且真实 NCP 会 1:1 回传；
-#    合成 NCP 会让栈超发 → 控制器挂死 → SSR → 蓝牙崩溃
-persist.vendor.leaudio.ncpsynth=0
-# 3. isocred.window: 动态信用窗口大小（维持协议栈持续供流）
-persist.vendor.leaudio.isocred.window=12
-# 4. iso.strip4: 必须为 0。那 4 字节是 HCI 规范强制的 Packet_Sequence_Number +
-#    ISO_SDU_Length（Core Spec Vol 4 Part E 5.4.5），剥掉会产生畸形包
-persist.vendor.leaudio.iso.strip4=0

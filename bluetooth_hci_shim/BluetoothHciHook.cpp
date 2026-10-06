@@ -183,108 +183,6 @@ static_assert(sizeof(HidlReturnVoid40) == 40, "Return<void> layout");
 // ---------------------------------------------------------------------------
 constexpr const char* kHci11Descriptor = "android.hardware.bluetooth@1.1::IBluetoothHci";
 constexpr const char* kHci10Descriptor = "android.hardware.bluetooth@1.0::IBluetoothHci";
-constexpr const char* kBaseDescriptor = "android.hidl.base@1.0::IBase";
-
-// ISO credit multiplication (v3.2):
-// The hastings firmware reports only 3 ISO buffers and returns NCP credits in
-// ~78ms batches, capping sustained throughput at ~38 SDU/s while LC3 48_4
-// needs 100 SDU/s. We hook hciEventReceived on the callbacks wrapper and
-// multiply the "Number of Completed Packets" count for ISO handles, letting
-// the stack keep a deeper in-flight pipeline.
-// Runtime knob: persist.vendor.leaudio.isocred.mult (default 1 = off; multiplying
-// NCPs underflows the stack's credit accounting, see docs/dead-ends.md)
-// ---------------------------------------------------------------------------
-static int GetIsoCreditMult() {
-    char v[PROP_VALUE_MAX] = {0};
-    if (__system_property_get("persist.vendor.leaudio.isocred.mult", v) > 0) {
-        int m = atoi(v);
-        if (m >= 1 && m <= 64) return m;
-    }
-    return 1;  // v4.0: off by default (multiplying NCPs underflows the stack)
-}
-
-static uint16_t gIsoHandles[16] = {0};
-static uint32_t gIsoHandleTick[16] = {0};
-static uint32_t gIsoSendTick = 0;
-// v3.4: synth NCP is opt-in (persist.vendor.leaudio.ncpsynth=1). The v3.3j
-// implementation corrupts the event stream (13-byte CC rewritten into a 6-byte
-// NCP without fixing the length/size fields) -> the stack parses a bogus
-// "Hardware Error 0x0f" event and aborts (SIGABRT). Kept for experiments only.
-static bool NcpSynthEnabled() {
-    static int sVal = -1;
-    if (sVal < 0) {
-        char v[PROP_VALUE_MAX] = {0};
-        sVal = (__system_property_get("persist.vendor.leaudio.ncpsynth", v) > 0 && v[0] == '1') ? 1 : 0;
-    }
-    return sVal == 1;
-}
-// v3.3j: per-handle outstanding-send accounting for honest NCP synthesis.
-// Each sendIsoData(h) increments pending[h]; each CC-0x1407 (= one firmware
-// completion) is attributed FIFO to the oldest pending handle and reported
-// as a standard NCP with count=1. Fluoride's used_credits can never underflow
-// this way (each synthesized NCP maps to a real outstanding send).
-static uint32_t gIsoPending[16] = {0};
-// v3.7: credit-window accounting. The stack starts with a tiny credit pool
-// (3) and only refills from NCPs, which the QCI HAL swallows. Measured
-// steady-state throughput = initial_credits x grant_rate = 3 x 10/s = 30/s,
-// which matches the observed wall exactly. Echoing the sent count back (v3.6)
-// cannot raise it, because grants == sends keeps the pool constant. Instead we
-// keep a WINDOW of credits in flight (the controller really completes every
-// packet 1:1 and has 155 buffers, so a window of ~12/handle is well within
-// its capacity).
-static uint32_t gIsoSent[16] = {0};
-static uint32_t gIsoGranted[16] = {0};
-static int IsoCreditWindow() {
-    // v3.9: re-read every call (grant path runs ~10/s) so the window can be
-    // swept live with setprop, no HAL restart needed.
-    char v[PROP_VALUE_MAX] = {0};
-    int n = __system_property_get("persist.vendor.leaudio.isocred.window", v);
-    int w = 12;
-    if (n > 0) {
-        int t = atoi(v);
-        if (t >= 0 && t <= 200) w = t;
-    }
-    return w;
-}
-static int FindIsoHandleSlot(uint16_t h) {
-    for (int i = 0; i < 16; i++)
-        if (gIsoHandles[i] == h) return i;
-    return -1;
-}
-
-static void RecordIsoHandle(uint16_t h) {
-    gIsoSendTick++;
-    int slot = FindIsoHandleSlot(h);
-    if (slot < 0 || gIsoHandles[slot] != h) {
-        // unknown handle: find a free slot or overwrite the oldest
-        slot = -1;
-        for (int i = 0; i < 16; i++)
-            if (gIsoHandles[i] == 0) { slot = i; break; }
-        if (slot < 0) {
-            int oldest = 0;
-            for (int i = 1; i < 16; i++)
-                if (gIsoHandleTick[i] < gIsoHandleTick[oldest]) { oldest = i; }
-            slot = oldest;
-        }
-        gIsoHandles[slot] = h;
-        gIsoPending[slot] = 0;
-        gIsoSent[slot] = 0;
-        gIsoGranted[slot] = 0;
-    }
-    gIsoHandleTick[slot] = gIsoSendTick;
-    gIsoPending[slot]++;
-    gIsoSent[slot]++;
-}
-
-static bool IsIsoHandle(uint16_t h) {
-    for (int i = 0; i < 16; i++) {
-        if (gIsoHandles[i] == h && gIsoHandles[i] != 0 &&
-            (gIsoSendTick - gIsoHandleTick[i]) < 4096) {
-            return true;
-        }
-    }
-    return false;
-}
 
 void* gStockHci = nullptr;
 typedef void (*SendDataToControllerFn)(void* thiz, int packetType, const HidlVec* data);
@@ -347,79 +245,6 @@ static bool PatchRingBufferIsoType() {
 // BpHwBluetoothHciCallbacks ctor from the 1.0 interface lib: (this, const sp<IBinder>&)
 typedef void (*BpCallbacksCtorFn)(void* thiz, const void* spBinder);
 BpCallbacksCtorFn gBpCallbacksCtor = nullptr;
-void* gHciEventReceivedSym = nullptr;  // set in ResolveSymbols()
-
-// hciEventReceived hook (on the Bp callbacks wrapper) — see NCP multiplication above.
-typedef HidlReturnVoid40 (*HciEventReceivedFn)(void* thiz, const HidlVec* event);
-HciEventReceivedFn gOrigHciEventReceived = nullptr;
-HciEventReceivedFn gOrigHciEventReceivedAlt = nullptr;
-void* gBpShadowStorage[64] = {nullptr};   // prefix + slots 0..59
-bool gBpHookInstalled = false;
-static uint32_t sMultPackets = 0;
-
-HidlReturnVoid40 HookedHciEventReceivedImpl(HciEventReceivedFn orig,
-                                            void* thiz, const HidlVec* event,
-                                            const char* tag) {
-    if (orig == nullptr || event == nullptr || event->mBuffer == nullptr) {
-        HidlReturnVoid40 z; memset(z.bytes, 0, sizeof(z.bytes)); return z;
-    }
-    static uint32_t sAllEvents = 0;
-    if (++sAllEvents <= 10 || (sAllEvents & 0x3ff) == 1) {
-        const uint8_t* db = (const uint8_t*)event->mBuffer;
-        LOGI("evt[%s]#%u: code=0x%02x len=%u b2..7=%02x %02x %02x %02x %02x %02x mult=%d",
-             tag, sAllEvents, event->mSize >= 1 ? db[0] : 0, event->mSize,
-             event->mSize >= 3 ? db[2] : 0, event->mSize >= 4 ? db[3] : 0,
-             event->mSize >= 5 ? db[4] : 0, event->mSize >= 6 ? db[5] : 0,
-             event->mSize >= 7 ? db[6] : 0, event->mSize >= 8 ? db[7] : 0,
-             GetIsoCreditMult());
-    }
-    int mult = GetIsoCreditMult();
-    const uint8_t* b = (const uint8_t*)event->mBuffer;
-    uint32_t n = event->mSize;
-    uint8_t tmp[64];
-    bool modified = false;
-    uint16_t repH = 0; uint32_t repFrom = 0, repTo = 0;
-    // HCI Number of Completed Packets event: [0]=0x13 [1]=len [2]=num_handles,
-    // then per handle: [handle:2][completed:2]
-    if (mult > 1 && n >= 8 && n <= sizeof(tmp) && b[0] == 0x13) {
-        uint32_t numHandles = b[2];
-        if (3 + 4 * numHandles == n) {
-            memcpy(tmp, b, n);
-            for (uint32_t i = 0; i < numHandles; i++) {
-                uint16_t h = (uint16_t)(tmp[3 + 4*i] | (tmp[4 + 4*i] << 8));
-                if (IsIsoHandle(h)) {
-                    uint32_t cnt = (uint32_t)(tmp[5 + 4*i] | (tmp[6 + 4*i] << 8));
-                    uint32_t ncnt = cnt * (uint32_t)mult;
-                    if (ncnt > 0xFFFF) ncnt = 0xFFFF;
-                    tmp[5 + 4*i] = (uint8_t)(ncnt & 0xFF);
-                    tmp[6 + 4*i] = (uint8_t)((ncnt >> 8) & 0xFF);
-                    modified = true;
-                    if (repH == 0) { repH = h; repFrom = cnt; repTo = ncnt; }
-                }
-            }
-        }
-    }
-    if (modified) {
-        if ((++sMultPackets & 0x3f) == 1) {
-            LOGI("NCP mult x%d: hdl 0x%x %u->%u", mult, repH, repFrom, repTo);
-        }
-        HidlVec vec;
-        vec.mBuffer = tmp;
-        vec.mSize = n;
-        vec.mOwnsBuffer = false;
-        vec.mPad[0] = vec.mPad[1] = vec.mPad[2] = 0;
-        return orig(thiz, &vec);
-    }
-    return orig(thiz, event);
-}
-
-HidlReturnVoid40 HookedHciEventReceived(void* thiz, const HidlVec* event) {
-    return HookedHciEventReceivedImpl(gOrigHciEventReceived, thiz, event, "A");
-}
-
-HidlReturnVoid40 HookedHciEventReceivedAlt(void* thiz, const HidlVec* event) {
-    return HookedHciEventReceivedImpl(gOrigHciEventReceivedAlt, thiz, event, "B");
-}
 
 // onTransact original (slot 11 of the BnHw primary vtable)
 typedef int32_t (*OnTransactFn)(void* self, uint32_t code,
@@ -438,10 +263,10 @@ OnTransactFn gOrigOnTransact = nullptr;
 // per handle), and its vtable slot 0 is `transact` (verified: _ZTVBpHwBinder at
 // 0xa6928, vptr point 0xa6940 = BpHwBinder::transact; Bp marshal code does
 // `ldr x8,[x0]; ldr x8,[x8]; blr` — slot 0, from the CFI-free iface lib).
-// hciEventReceived marshals the event into the parcel and transacts with
-// code 2. We scan the parcel buffer for self-consistent NCP event structures
-// (0x13, param_len == 1+4n, complete handle/count tuples), multiply the counts
-// for ISO handles (tracked by the sendIsoData hook), then forward.
+// hciEventReceived marshals the event into the parcel and transacts with code 2;
+// those parcels are only observed here (event / Command Complete histograms) and
+// forwarded unchanged. The other reason for this hook is the ISO RX rewrite
+// above, which is what actually has to happen.
 // ---------------------------------------------------------------------------
 typedef int32_t (*BinderTransactFn)(void* thiz, uint32_t code,
                                      const ::android::hardware::Parcel* data,
@@ -452,7 +277,6 @@ void* gBinderShadowStorage[40] = {nullptr};  // prefix(4) + slots 0..35
 void* gHookedBinder = nullptr;
 static uint32_t sEvtParcels = 0;
 static uint32_t sCcOpcodeHist[65536] = {0};  // per-opcode CC counts (v3.3g diag)
-static uint32_t sEvtMultApplied = 0;
 static uint32_t sIsoRxForwarded = 0;  // ISO packets rewritten sco->iso (v3.13)
 static uint32_t sIsoRxNoToken = 0;    // parcels whose token could not be patched
 
@@ -494,36 +318,6 @@ static bool PatchCbTokenTo11(::android::hardware::Parcel* data) {
     return false;
 }
 
-static bool MultiplyNcpInBuffer(uint8_t* b, size_t size) {
-    bool modified = false;
-    const int mult = GetIsoCreditMult();
-    if (mult <= 1) return false;
-    // scan for: [0]=0x13 [1]=param_len==1+4n [2]=n, fully contained
-    // (NCP param_len = num_handles byte + 4B per handle tuple)
-    for (size_t i = 0; i + 4 <= size; i++) {
-        if (b[i] != 0x13) continue;
-        uint32_t n = b[i + 2];
-        if (n < 1 || n > 10) continue;
-        if (b[i + 1] != (uint8_t)(1 + 4 * n)) continue;
-        if (i + 3 + 4 * n > size) continue;
-        for (uint32_t k = 0; k < n; k++) {
-            uint16_t h = (uint16_t)(b[i + 3 + 4 * k] | (b[i + 4 + 4 * k] << 8));
-            if (!IsIsoHandle(h)) continue;
-            uint32_t cnt = (uint32_t)(b[i + 5 + 4 * k] | (b[i + 6 + 4 * k] << 8));
-            uint32_t ncnt = cnt * (uint32_t)mult;
-            if (ncnt > 0xFFFF) ncnt = 0xFFFF;
-            b[i + 5 + 4 * k] = (uint8_t)(ncnt & 0xFF);
-            b[i + 6 + 4 * k] = (uint8_t)((ncnt >> 8) & 0xFF);
-            modified = true;
-            if ((++sEvtMultApplied & 0x3f) == 1) {
-                LOGI("NCP mult x%d in transact: hdl 0x%x %u->%u (parcel off %zu)",
-                     mult, h, cnt, ncnt, i);
-            }
-        }
-    }
-    return modified;
-}
-
 int32_t HookedBinderTransact(void* thiz, uint32_t code,
                              const ::android::hardware::Parcel* data,
                              ::android::hardware::Parcel* reply,
@@ -563,7 +357,7 @@ int32_t HookedBinderTransact(void* thiz, uint32_t code,
         // objects" of 0x28 bytes each: {magic 0x70742a85 LE, flags u32,
         //  ptr u64, size u64}. flags==1 entries point at the actual event bytes
         // on the heap — NOT inlined in the parcel. Scan the parcel for these
-        // objects and multiply NCP counts inside the pointed-to event buffer.
+        // objects to histogram the event codes and Command Complete opcodes.
         {
             static const uint8_t kBufObjMagic[4] = {0x85, 0x2a, 0x74, 0x70};
             static uint32_t sEvtCodeHist[256] = {0};
@@ -607,85 +401,6 @@ int32_t HookedBinderTransact(void* thiz, uint32_t code,
                     }
                 }
                 anyFlag1 = true;
-                // v3.4: honest NCP synthesis — fixes the credit starvation.
-                //
-                // Facts (verified with a full btsnoop capture):
-                //  * transport level (HAL<->controller): the controller DOES send
-                //    standard NCPs (0x13) for every ISO packet, 1:1 with our ISO
-                //    data packets (handle 0x05: 686 sent / 686 completed).
-                //  * stack level (what the HAL forwards to Fluoride): ZERO 0x13.
-                //    The QCI HAL swallows them and only forwards its own vendor
-                //    0x1407 poll Command Complete (~10/s) which carries a private
-                //    credit counter. Fluoride therefore never refills iso_credits_
-                //    -> it drops ~85% of the audio (the stutter).
-                //  * The HAL's "vendor wraps ISO as 0x1407" theory was WRONG: ISO
-                //    data goes to the controller as standard HCI ISO packets
-                //    (packet type 0x05).
-                //
-                // Since the controller completes exactly one credit per ISO packet
-                // we forwarded, crediting exactly gIsoPending[] per handle is
-                // honest (not over-crediting: the v3.3i underflow came from
-                // multiplying an already-correct count). We piggyback on the HAL's
-                // own 0x1407 CC and report all handles at once.
-                //
-                // CRITICAL: the HIDL vec length field inside the parcel must be
-                // updated to the shortened event size. v3.3j rewrote the 13-byte CC
-                // into a 6-byte NCP without touching it, so the stack parsed the 7
-                // stale trailing bytes as a bogus event -> "Hardware Error 0x0f" ->
-                // SIGABRT crash loop.
-                if (NcpSynthEnabled() && bsz >= 7 && eb[0] == 0x0e && eb[3] == 0x07 &&
-                    eb[4] == 0x14) {
-                    const int win = IsoCreditWindow();
-                    int n = 0;
-                    for (int q = 0; q < 16; q++) {
-                        if (gIsoHandles[q] == 0) continue;
-                        if (win == 0) {
-                            if (gIsoPending[q] > 0) n++;   // honest echo mode
-                        } else {
-                            int64_t avail = 3 + (int64_t)gIsoGranted[q] - (int64_t)gIsoSent[q];
-                            if ((int64_t)win - avail > 0) n++;
-                        }
-                    }
-                    size_t need = 3 + 4 * (size_t)n;
-                    if (n > 0 && need <= bsz) {
-                        uint8_t* w = (uint8_t*)eb;  // event buffer is heap, writable
-                        w[0] = 0x13;                // Number Of Completed Packets
-                        w[1] = (uint8_t)(1 + 4 * n);
-                        w[2] = (uint8_t)n;
-                        size_t o2 = 3;
-                        uint32_t total = 0;
-                        for (int q = 0; q < 16; q++) {
-                            if (gIsoHandles[q] == 0) continue;
-                            int64_t c;
-                            if (win == 0) {
-                                if (gIsoPending[q] == 0) continue;
-                                c = (int64_t)gIsoPending[q];
-                            } else {
-                                int64_t avail = 3 + (int64_t)gIsoGranted[q] - (int64_t)gIsoSent[q];
-                                c = (int64_t)win - avail;
-                                if (c <= 0) continue;
-                            }
-                            if (c > 0xFFFF) c = 0xFFFF;
-                            uint16_t h = gIsoHandles[q];
-                            w[o2++] = (uint8_t)(h & 0xFF);
-                            w[o2++] = (uint8_t)(h >> 8);
-                            w[o2++] = (uint8_t)((uint16_t)c & 0xFF);
-                            w[o2++] = (uint8_t)(((uint16_t)c >> 8) & 0xFF);
-                            total += (uint32_t)c;
-                            gIsoGranted[q] += (uint32_t)c;
-                            gIsoPending[q] = 0;
-                        }
-                        // shrink the hidl_vec so the stack reads exactly our event
-                        uint64_t nsz = (uint64_t)need;
-                        memcpy((void*)(uintptr_t)(buf + o + 0x10), &nsz, 8);
-                        static uint32_t sSynthNcp = 0;
-                        if ((++sSynthNcp & 0x07) == 1) {
-                            LOGI("NCP synth win=%d: %d handle(s), %u credit(s) (bsz %zu->%zu) (#%u)",
-                                 win, n, total, bsz, need, sSynthNcp);
-                        }
-                    }
-                }
-                MultiplyNcpInBuffer((uint8_t*)eb, (size_t)bsz);
             }
             // periodic histogram: which event codes flow through hciEventReceived?
             if ((sEvtParcels & 0x3ff) == 0 && anyFlag1) {
@@ -702,9 +417,6 @@ int32_t HookedBinderTransact(void* thiz, uint32_t code,
                 }
                 LOGI("CC opcode hist: %s", h2);
             }
-        }
-        if (buf != nullptr && sz >= 8 && sz <= 8192) {
-            MultiplyNcpInBuffer((uint8_t*)buf, sz);  // legacy inline fallback
         }
     }
     return gOrigBinderTransact(thiz, code, data, reply, flags, onTransactDone);
@@ -861,7 +573,6 @@ HidlReturnVoid40 HookedInterfaceChain(void* /*thiz*/, const void* cbObj) {
 int32_t HandleInitialize11(void* self,
                            const ::android::hardware::Parcel& data,
                            ::android::hardware::Parcel* reply) {
-    typedef ::android::hardware::Parcel P;
     if (!data.enforceInterface(kHci11Descriptor)) {
         LOGE("initialize_1_1: enforceInterface(1.1) failed");
         return (int32_t)0x80000001u;  // stock error code
@@ -891,45 +602,6 @@ int32_t HandleInitialize11(void* self,
         }
         void* cbObj = malloc(216);  // sizeof(BpHwBluetoothHciCallbacks)
         gBpCallbacksCtor(cbObj, &binderSp);
-        // Diagnostic (v3.2e): dump the full 216-byte wrapper object to enumerate
-        // every embedded vptr (primary @ +0, possible secondary @ +0x20/RefBase).
-        // Decoded on host against the 1.0 interface lib's vtables.
-        {
-            void** p = (void**)cbObj;
-            char buf[600] = {};
-            int off = 0;
-            for (int i = 0; i < 27; i++)  // 27 * 8 = 216 bytes
-                hexCat(buf, sizeof(buf), &off, "%llx ", (unsigned long long)p[i]);
-            LOGI("wrapper dump [0..26] (216B): %s", buf);
-        }
-        // Shadow the wrapper's primary vtable and hook hciEventReceived for
-        // ISO NCP credit multiplication. The vendor may dispatch through the
-        // raw function slot (found by dlsym match) or the adjacent this-adjusting
-        // thunk slot (offset 0x78), so we hook BOTH.
-        if (gBpCallbacksCtor != nullptr && !gBpHookInstalled && gHciEventReceivedSym != nullptr) {
-            void** liveVptr = *(void***)cbObj;
-            int slot = -1;
-            for (int i = 0; i < 60; i++) {
-                if (liveVptr[i] == gHciEventReceivedSym) { slot = i; break; }
-            }
-            if (slot >= 0) {
-                memcpy(gBpShadowStorage, liveVptr - 4, sizeof(gBpShadowStorage));
-                gOrigHciEventReceived = (HciEventReceivedFn)liveVptr[slot];
-                gOrigHciEventReceivedAlt = (HciEventReceivedFn)liveVptr[slot + 1];
-                gBpShadowStorage[4 + slot] = (void*)&HookedHciEventReceived;
-                if (slot + 1 < 60) {
-                    gBpShadowStorage[4 + slot + 1] = (void*)&HookedHciEventReceivedAlt;
-                }
-                gBpHookInstalled = true;
-                LOGI("hciEventReceived hooks installed (slots %d+%d, sym=%p ctor=%p)",
-                     slot, slot + 1, gHciEventReceivedSym, (void*)gBpCallbacksCtor);
-                LOGI("live vptr=%p [12..18]: %p %p %p %p %p %p %p", (void*)liveVptr,
-                     liveVptr[12], liveVptr[13], liveVptr[14], liveVptr[15],
-                     liveVptr[16], liveVptr[17], liveVptr[18]);
-            } else {
-                LOGE("hciEventReceived symbol not found in wrapper vtable");
-            }
-        }
         IncStrong(cbObj, &callbacks);
         callbacks = cbObj;
         // v3.3: hook the shared mRemote BpHwBinder (slot 0 = transact) — the
@@ -1001,21 +673,8 @@ int32_t HandleInitialize11(void* self,
 // Transaction code 7: sendIsoData — mirror of _hidl_sendAclData with the 1.1
 // descriptor; data forwarded to stock sendDataToController(HciPacketType::ISO).
 // ---------------------------------------------------------------------------
-// v4.0: off unless explicitly set to 1. The 4 bytes are the mandatory HCI ISO
-// Packet_Sequence_Number + ISO_SDU_Length (Core Spec Vol 4 Part E 5.4.5).
-static bool IsoStrip4Enabled() {
-    static int sV = -1;
-    if (sV < 0) {
-        char v[PROP_VALUE_MAX] = {0};
-        sV = (__system_property_get("persist.vendor.leaudio.iso.strip4", v) > 0 &&
-              v[0] == '1') ? 1 : 0;
-    }
-    return sV == 1;
-}
-
 int32_t HandleSendIsoData(const ::android::hardware::Parcel& data,
                           ::android::hardware::Parcel* reply) {
-    typedef ::android::hardware::Parcel P;
     if (!data.enforceInterface(kHci11Descriptor)) {
         LOGE("sendIsoData: enforceInterface(1.1) failed");
         return (int32_t)0x80000001u;
@@ -1039,47 +698,7 @@ int32_t HandleSendIsoData(const ::android::hardware::Parcel& data,
     isoVec.mSize = vec->mSize;
     isoVec.mOwnsBuffer = false;
     isoVec.mPad[0] = isoVec.mPad[1] = isoVec.mPad[2] = 0;
-    // Track the ISO connection handle (bits 11-0 of the first halfword) so the
-    // NCP multiplication hook only boosts credits for ISO handles.
-    if (buf != nullptr && vec->mSize >= 2) {
-        RecordIsoHandle((uint16_t)(((const uint8_t*)buf)[0] |
-                                   (((const uint8_t*)buf)[1] << 8)) & 0x0FFF);
-    }
     if (gSendDataToController != nullptr && gStockHci != nullptr) {
-        // v3.11: strip the 4-byte framed-SDU header (root cause of the crash).
-        //
-        // btsnoop of a streaming attempt (CIG: Framing=0 i.e. UNFRAMED,
-        // Max_SDU_C2P=0x009b=155) shows every SDU is emitted as two HCI ISO
-        // packets:
-        //   len=160 PB=0 hcilen=155  05 05 00 9b 00 | 00 00 | 9a 00 | frame...
-        //   len=  8 PB=3 hcilen=3    05 05 30 03 00 | 34 ...
-        // The first fragment starts with the AOSP framed-SDU header
-        // [seq:2][len:2] where len=0x009a=154, so the SDU is 4+154 = 158 bytes
-        // while the CIS was negotiated UNFRAMED with Max_SDU=155 (the LC3 frame
-        // size). The controller asserts on that: HW error 0x0f -> SSR ~4s later
-        // -> HAL dies -> stack aborts -> "no sound + Bluetooth restarts".
-        // Removing the 4-byte header leaves 151+3 = 154 bytes = exactly the LC3
-        // frame, i.e. <= Max_SDU, and consistent with the unframed CIS.
-        uint8_t stripBuf[1024];
-        const uint8_t* p = (const uint8_t*)buf;
-        if (IsoStrip4Enabled() && p != nullptr && vec->mSize >= 8) {
-            uint32_t hf = (uint32_t)p[0] | ((uint32_t)p[1] << 8);
-            uint32_t pb = (hf >> 12) & 0x3;   // 0=first frag, 2=complete SDU, 3=last frag
-            uint32_t l = (uint32_t)p[2] | ((uint32_t)p[3] << 8);
-            if ((pb == 0 || pb == 2 || pb == 3) && l >= 8 && (uint64_t)l + 4 == vec->mSize) {
-                uint32_t newlen = l - 4;
-                memcpy(stripBuf, p, 4);
-                stripBuf[2] = (uint8_t)(newlen & 0xFF);
-                stripBuf[3] = (uint8_t)((newlen >> 8) & 0xFF);
-                memcpy(stripBuf + 4, p + 8, newlen);
-                isoVec.mBuffer = stripBuf;
-                isoVec.mSize = 4u + newlen;
-                static uint32_t sStripLog = 0;
-                if ((++sStripLog & 0x3f) == 1)
-                    LOGI("ISO strip: pb=%u hcilen %u -> %u (sdu hdr seq=%u len=%u)", pb, l,
-                         newlen, (unsigned)(p[4] | (p[5] << 8)), (unsigned)(p[6] | (p[7] << 8)));
-            }
-        }
         gSendDataToController(gStockHci, 5 /* HciPacketType::ISO_DATA */, &isoVec);
     } else {
         LOGE("sendIsoData: controller/impl unresolved, dropping %u bytes", vec->mSize);
@@ -1098,103 +717,23 @@ int32_t HandleSendIsoData(const ::android::hardware::Parcel& data,
 }
 
 // ---------------------------------------------------------------------------
-// v3.4 diag: HCI command capture (read-only, parcel position restored).
-//
-// Purpose: learn the *real* CIS parameters the stack programs into the
-// controller (ISO_Interval / framing / RTN / max transport latency / PHY / BN-FT)
-// and confirm the host->controller packet rate (one HCI ISO packet per SDU).
-// This is what decides whether "fewer, bigger packets" (aggregation) is even
-// allowed by the negotiated CIS, and how much room the ISO interval has.
-// ---------------------------------------------------------------------------
-void DumpCigParamsCommand(const uint8_t* p, size_t plen) {
-    if (plen < 17) return;
-    uint8_t cig = p[0];
-    uint32_t sdu_c2p = (uint32_t)p[1] | ((uint32_t)p[2] << 8) | ((uint32_t)p[3] << 16);
-    uint32_t sdu_p2c = (uint32_t)p[4] | ((uint32_t)p[5] << 8) | ((uint32_t)p[6] << 16);
-    uint8_t sca = p[7], packing = p[8], framing = p[9];
-    uint16_t lat_c2p = (uint16_t)(p[10] | (p[11] << 8));
-    uint16_t lat_p2c = (uint16_t)(p[12] | (p[13] << 8));
-    uint8_t rtn_c2p = p[14], rtn_p2c = p[15], num = p[16];
-    LOGI("LE_SET_CIG_PARAMS: cig=%u sdu_c2p=%uus sdu_p2c=%uus sca=%u packing=%u framing=%u",
-         cig, sdu_c2p, sdu_p2c, sca, packing, framing);
-    LOGI("  lat_c2p=%u lat_p2c=%u rtn_c2p=%u rtn_p2c=%u num_cis=%u", lat_c2p, lat_p2c,
-         rtn_c2p, rtn_p2c, num);
-    size_t o = 17;
-    for (uint8_t i = 0; i < num && o + 11 <= plen; i++) {
-        uint8_t cis_id = p[o];
-        uint16_t ms_c2p = (uint16_t)(p[o + 1] | (p[o + 2] << 8));
-        uint16_t ms_p2c = (uint16_t)(p[o + 3] | (p[o + 4] << 8));
-        LOGI("  CIS[%u] id=%u maxsdu_c2p=%u maxsdu_p2c=%u phy_c2p=0x%02x phy_p2c=0x%02x "
-             "bn=%u/%u ft=%u/%u",
-             i, cis_id, ms_c2p, ms_p2c, p[o + 5], p[o + 6], p[o + 7], p[o + 8], p[o + 9],
-             p[o + 10]);
-        o += 11;
-    }
-    if (o + 2 <= plen) {
-        uint16_t iso_iv = (uint16_t)(p[o] | (p[o + 1] << 8));
-        LOGI("  ** ISO_Interval=%u (x1.25ms = %.2f ms) **", iso_iv, iso_iv * 1.25);
-    }
-}
-
-void DumpHciCommandIfInteresting(const ::android::hardware::Parcel& data, uint32_t code) {
-    const size_t savedPos = data.dataPosition();
-    const HidlVec* vec = nullptr;
-    size_t parent = 0;
-    int32_t err = data.readBuffer(sizeof(HidlVec), &parent, (const void**)&vec);
-    if (err == 0 && vec != nullptr && vec->mSize >= 3 && vec->mSize <= 4096) {
-        const void* buf = nullptr;
-        size_t handle = 0;
-        err = data.readNullableEmbeddedBuffer(vec->mSize, &handle, parent, 0, &buf);
-        if (err == 0 && buf != nullptr) {
-            const uint8_t* c = (const uint8_t*)buf;
-            size_t n = vec->mSize;
-            uint16_t opcode = (uint16_t)(c[0] | (c[1] << 8));
-            uint8_t plen = c[2];
-            // v3.4diag: log each newly-seen opcode once (capped) so we learn
-            // which transaction code carries HCI commands, without flooding.
-            static uint32_t sSeen[65536 / 32] = {0};
-            static uint32_t sSeenLogged = 0;
-            bool first = (sSeen[opcode >> 5] & (1u << (opcode & 31))) == 0;
-            if (first) {
-                sSeen[opcode >> 5] |= (1u << (opcode & 31));
-                if (sSeenLogged < 40) {
-                    sSeenLogged++;
-                    char h[128] = {}; int o2 = 0;
-                    for (size_t q = 0; q < n && q < 16; q++)
-                        hexCat(h, sizeof(h), &o2, "%02x ", c[q]);
-                    LOGI("hci opcode new: 0x%04x (txcode=%u len=%u): %s", opcode, code,
-                         (unsigned)n, h);
-                }
-            }
-            if (opcode == 0x2062) {  // LE Set CIG Parameters
-                DumpCigParamsCommand(c + 3, (size_t)plen <= n - 3 ? plen : n - 3);
-            } else if (opcode == 0x2064 || opcode == 0x2065 || opcode == 0x2066 ||
-                       opcode == 0x2061 || opcode == 0x2063) {
-                char h[160] = {}; int o2 = 0;
-                for (size_t q = 0; q < n && q < 32; q++)
-                    hexCat(h, sizeof(h), &o2, "%02x ", c[q]);
-                LOGI("LE_CIS_CMD opcode=0x%04x len=%u: %s", opcode, (unsigned)n, h);
-            }
-        }
-    }
-    data.setDataPosition(savedPos);
-}
-
-// ---------------------------------------------------------------------------
 // v4.1: cap Max_Transport_Latency in LE Set CIG Parameters (0x2062).
 //
-// With only 3 ISO buffers, the controller must run a 10 ms ISO interval with
-// BN=1. For MEDIA the stack asks for up to 100 ms latency, and the controller
-// then picks ISO_Interval=40ms, BN=4, FT=2 -> 8 SDUs must be buffered for two
-// CIS -> ~38 SDU/s (measured). Capping the latency makes it choose
-// 10 ms / BN=1 / FT=1 (same as the LIVE config, which reached 150/s).
+// For MEDIA the stack asks for up to 100 ms. Measured on 00680 (btsnoop, the
+// LE CIS Established event): without the cap the controller picks
+// ISO_Interval=40ms / transport latency 84570us, the in-flight queue saturates
+// at the controller's 22 buffers, and the first 6-8 packets of a stream are
+// dropped (btm_iso_impl.h "dropping ISO packet, iso credits: 0") because the
+// credit pool is 0 until the first NCP arrives one ISO interval later.
+// Capping it to 10 ms makes the controller choose 10 ms / 7210us, which runs
+// with 8/22 in flight and zero drops.
 // Incoming binder buffers are read-only, so the command is copied, patched and
 // sent via the stock sendDataToController(COMMAND), exactly what the stock
 // sendHciCommand does. Prop persist.vendor.leaudio.cig.maxlat (ms, default 10,
 // 0 = off). Returns true if the transaction was fully handled here.
 // ---------------------------------------------------------------------------
-// Both caps are re-read on every LE Set CIG Parameters (rare), so they can be
-// tuned with setprop + stream restart, no HAL restart.
+// Re-read on every LE Set CIG Parameters (rare), so it can be tuned with
+// setprop + stream restart, no HAL restart.
 static int PropInt(const char* name, int def, int lo, int hi) {
     char v[PROP_VALUE_MAX] = {0};
     if (__system_property_get(name, v) > 0) {
@@ -1204,9 +743,6 @@ static int PropInt(const char* name, int def, int lo, int hi) {
     return def;
 }
 static int CigMaxLatencyCap() { return PropInt("persist.vendor.leaudio.cig.maxlat", 10, 0, 4000); }
-// RTN drives NSE (subevents per CIS). Fewer subevents = shorter CIG event =
-// earlier NCP = earlier buffer refill. -1 = off.
-static int CigMaxRtn() { return PropInt("persist.vendor.leaudio.cig.maxrtn", -1, -1, 15); }
 
 bool MaybeRewriteCigParams(const ::android::hardware::Parcel& data,
                            ::android::hardware::Parcel* reply) {
@@ -1244,7 +780,6 @@ bool MaybeRewriteCigParams(const ::android::hardware::Parcel& data,
     p[12] = (uint8_t)(np2c & 0xFF); p[13] = (uint8_t)(np2c >> 8);
     // params[14] = CIS_Count, then 9 bytes per CIS:
     // [id][sdu_c2p:2][sdu_p2c:2][phy_c2p][phy_p2c][rtn_c2p][rtn_p2c]
-    const int rcap = CigMaxRtn();
     const uint32_t plen = cmd[2];
     const uint32_t ncis = p[14];
     uint8_t rc2p = 0, rp2c = 0;
@@ -1252,14 +787,10 @@ bool MaybeRewriteCigParams(const ::android::hardware::Parcel& data,
         for (uint32_t i = 0; i < ncis; i++) {
             uint8_t* e = p + 15 + 9 * i;
             rc2p = e[7]; rp2c = e[8];
-            if (rcap >= 0) {
-                if (e[7] > rcap) e[7] = (uint8_t)rcap;
-                if (e[8] > rcap) e[8] = (uint8_t)rcap;
-            }
         }
     }
-    LOGI("CIG params: max transport latency c2p %u->%u ms, p2c %u->%u ms, rtn %u/%u (cap %d), "
-         "%u CIS", lc2p, nc2p, lp2c, np2c, rc2p, rp2c, rcap, ncis);
+    LOGI("CIG params: max transport latency c2p %u->%u ms, p2c %u->%u ms, rtn %u/%u, "
+         "%u CIS", lc2p, nc2p, lp2c, np2c, rc2p, rp2c, ncis);
     HidlVec v;
     v.mBuffer = cmd; v.mSize = vec->mSize; v.mOwnsBuffer = false;
     v.mPad[0] = v.mPad[1] = v.mPad[2] = 0;
@@ -1328,18 +859,14 @@ int32_t HookedOnTransact(void* self, uint32_t code,
 // ---------------------------------------------------------------------------
 // Library init
 // ---------------------------------------------------------------------------
-// BpHwBluetoothHciCallbacks ctor and hciEventReceived live in the 1.0 interface library.
+// BpHwBluetoothHciCallbacks ctor lives in the 1.0 interface library.
 
 void ResolveSymbols() {
-    // BpHwBluetoothHciCallbacks ctor lives in the 1.0 interface library.
     void* ifaceLib = dlopen("/vendor/lib64/android.hardware.bluetooth@1.0.so", RTLD_NOW);
     if (ifaceLib != nullptr) {
         gBpCallbacksCtor = (BpCallbacksCtorFn)dlsym(
             ifaceLib,
             "_ZN7android8hardware9bluetooth4V1_025BpHwBluetoothHciCallbacksC1ERKNS_2spINS0_7IBinderEEE");
-        gHciEventReceivedSym = dlsym(
-            ifaceLib,
-            "_ZN7android8hardware9bluetooth4V1_025BpHwBluetoothHciCallbacks16hciEventReceivedERKNS0_8hidl_vecIhEE");
     }
     if (gBpCallbacksCtor == nullptr) {
         LOGW("BpHwBluetoothHciCallbacks ctor not resolved: %s", dlerror());
@@ -1414,8 +941,8 @@ void* HIDL_FETCH_IBluetoothHci(const char* name) {
 // Constructor: runs at dlopen() inside the HAL service process
 // ---------------------------------------------------------------------------
 __attribute__((constructor)) static void ShimInit() {
-    LOGI("BluetoothHciHook v4.4 init (ring ISO patch + ISO RX forwarding, "
-         "CIG max latency cap=%d ms)", CigMaxLatencyCap());
+    LOGI("BluetoothHciHook v4.5 init (ring ISO patch=%d + ISO RX forwarding, "
+         "CIG max latency cap=%d ms)", RingIsoPatchEnabled() ? 1 : 0, CigMaxLatencyCap());
     ResolveSymbols();
     RegisterBnConstructorHooks();
 }
