@@ -1,7 +1,7 @@
 # LE Audio on marble — Redmi Note 12 Turbo
 
 设备：Redmi Note 12 Turbo (`marble`)，LineageOS 23.2 Nightly / Android 16，KernelSU
-耳机：ROSELINK（LE Audio Unicast，CSIP 双耳组，LC3）
+耳机：ROSELINK / Furina Endless Solo of Solitude-LEA & ZZZ-ANGELS-OWS-LEA（LE Audio Unicast，CSIP 双耳组，LC3）
 
 > **先读 [`docs/README.md`](docs/README.md)** —— 本项目文档已重组为 `docs/` 五篇：
 > `architecture.md`（架构+构建配方）、`root-causes.md`（9 个根因证据链+无声决策树）、
