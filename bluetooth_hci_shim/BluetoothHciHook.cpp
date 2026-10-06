@@ -1242,19 +1242,18 @@ void OnEvent(uint8_t* eb, size_t bsz) {
             q->inflight -= c;
             gInflight = gInflight >= c ? gInflight - c : 0;
             gNcp += cnt;
-            // The stack's ISO credit pool is global (btm_iso_impl.h iso_credits_);
-            // per-CIS used_credits is bookkeeping only. So any ISO NCP slot may
-            // carry the ack: use it for the handle with the most unacked packets,
-            // keeping per-handle counts exact. Acking only on a handle's own NCP
-            // left the stack short of credits at its 10 ms tick (measured 146/s).
-            HQ* best = q;
-            for (auto& o : gQ)
-                if (o.used && o.stackOut > best->stackOut) best = &o;
-            uint32_t rep = best->stackOut > 0xFFFF ? 0xFFFF : best->stackOut;
-            best->stackOut -= rep;
+            // v4.3: Honest, per-handle credit return without cross-handle swapping.
+            // Swapping handles caused Fluoride's used_credits to underflow to 65535
+            // (0 - 1 = 65535 uint16) whenever an ack was routed to a handle with
+            // no outstanding packets in the stack, dropping that ear completely!
+            // Furthermore, never report more credits than the controller actually freed (cnt),
+            // and never report more credits than the stack actually sent on this handle (q->stackOut).
+            uint32_t rep = cnt;
+            if (rep > q->stackOut) rep = q->stackOut;
+            q->stackOut -= rep;
             gAcked += rep;
-            t[0] = (uint8_t)(best->handle & 0xFF);
-            t[1] = (uint8_t)((best->handle >> 8) & 0x0F);
+            t[0] = (uint8_t)(q->handle & 0xFF);
+            t[1] = (uint8_t)((q->handle >> 8) & 0x0F);
             t[2] = (uint8_t)(rep & 0xFF);
             t[3] = (uint8_t)(rep >> 8);
             any = true;
@@ -1696,7 +1695,7 @@ void* HIDL_FETCH_IBluetoothHci(const char* name) {
 // Constructor: runs at dlopen() inside the HAL service process
 // ---------------------------------------------------------------------------
 __attribute__((constructor)) static void ShimInit() {
-    LOGI("BluetoothHciHook v4.1 init (ring ISO patch + ISO RX forwarding + ISO credit proxy=%d, "
+    LOGI("BluetoothHciHook v4.3 init (ring ISO patch + ISO RX forwarding + ISO credit proxy=%d, "
          "CIG max latency cap=%d ms)", IsoProxyEnabled() ? 1 : 0, CigMaxLatencyCap());
     ResolveSymbols();
     RegisterBnConstructorHooks();
