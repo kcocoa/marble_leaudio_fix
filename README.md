@@ -3,12 +3,18 @@
 设备：Redmi Note 12 Turbo (`marble`)，LineageOS 23.2 Nightly / Android 16，KernelSU
 耳机：ROSELINK（LE Audio Unicast，CSIP 双耳组，LC3）
 
+> **先读 [`docs/README.md`](docs/README.md)** —— 本项目文档已重组为 `docs/` 五篇：
+> `architecture.md`（架构+构建配方）、`root-causes.md`（9 个根因证据链+无声决策树）、
+> `dead-ends.md`（死路与失误复盘）、`operations.md`（部署/救援流程）。
+> 本文件与 `TODO.md`、`LEAUDIO_MARBLE_INVESTIGATION.md` 为历史流水账，仅供追溯。
+
 目标：让 LE Audio 正常工作。原始症状是「链路建立、有声音但严重卡顿」，后续排查中
 发现真正的阻塞是**控制器固件崩溃**（表现为「没声音 + 3-4 秒后蓝牙重启」）。
 
 ---
 
 ## 目录结构
+
 
 ```
 bluetooth_hci_shim/BluetoothHciHook.cpp   核心：QTI HAL 的 HIDL 1.1 shim（v3.10）
@@ -21,6 +27,12 @@ deploy_shim.sh                            整模块部署
 TODO.md                                   累积的调查记录（含 bootloop 事故复盘）
 LEAUDIO_MARBLE_INVESTIGATION.md           早期调查笔记
 monitor_runs/                             历史采集（只保留 summary/events，原始 logcat 已忽略）
+docs/                                     ★ 现行文档（先读这里）
+  README.md                               索引 + 当前状态一页纸
+  architecture.md                         三层架构 / 五种修改手段 / 构建配方 / ABI 硬知识
+  root-causes.md                          9 个已确诊根因的完整证据链 + 无声排查决策树
+  dead-ends.md                            5 条死路 + 我的思维误区复盘
+  operations.md                           部署 / 重启 / 救援流程 + 两次事故复盘
 ```
 
 ## 构建 shim
