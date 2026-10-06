@@ -13,9 +13,11 @@ ro.bluetooth.leaudio_offload.supported=false
 # BluetoothHciHook shim 配置：
 # 1. patchring: 运行时修复 QTI 环形缓冲区拒绝 ISO 包（type 5）的 bug
 persist.vendor.leaudio.iso.patchring=1
-# 2. ncpsynth: 开启 NCP 凭据合成，解决 QTI HAL 吞掉控制器完成事件导致的 credit 饥饿
-persist.vendor.leaudio.ncpsynth=1
+# 2. ncpsynth: 必须为 0。控制器只有 3 个 ISO 缓冲（LE Read Buffer Size v2），
+#    且真实 NCP 会 1:1 回传；合成 NCP 会让栈超发 → 控制器挂死 → SSR → 蓝牙崩溃
+persist.vendor.leaudio.ncpsynth=0
 # 3. isocred.window: 动态信用窗口大小（维持协议栈持续供流）
 persist.vendor.leaudio.isocred.window=12
-# 4. iso.strip4: 剥离 Fluoride 多余的 4 字节 SDU 头，防止超长切片
-persist.vendor.leaudio.iso.strip4=1
+# 4. iso.strip4: 必须为 0。那 4 字节是 HCI 规范强制的 Packet_Sequence_Number +
+#    ISO_SDU_Length（Core Spec Vol 4 Part E 5.4.5），剥掉会产生畸形包
+persist.vendor.leaudio.iso.strip4=0
