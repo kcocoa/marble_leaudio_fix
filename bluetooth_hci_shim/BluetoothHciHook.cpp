@@ -41,6 +41,7 @@
 #include <string>
 #include <functional>
 #include <android/log.h>
+#include <stdarg.h>
 #include <hidl/ConcurrentMap.h>
 
 // bionic property API (resolved from libc at runtime)
@@ -51,6 +52,40 @@ extern "C" int __system_property_get(const char* name, char* value);
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+
+// ---------------------------------------------------------------------------
+// Truncation-safe formatted append.
+//
+// snprintf() returns the length it *would* have written (excluding the NUL),
+// NOT the number of bytes actually stored. Accumulating that return value
+// drives the offset past the end of the buffer, at which point
+// `sizeof(buf) - off` wraps to a huge size_t and bionic's FORTIFY turns it
+// into __fortify_fatal() -> abort(). That exact bug aborted the HAL on the
+// very first forwarded ISO RX packet (2026-10-06): char h[96] + 8 rounds of
+// a 17-char format = 136 > 96, and round 7 got size == (size_t)-6.
+// See git log "fix(shim): hexdump 缓冲区溢出" for the full tombstone.
+//
+// Always clamp the offset and stop; never trust the return value.
+// ---------------------------------------------------------------------------
+__attribute__((format(printf, 4, 5)))
+static inline void hexCat(char* buf, size_t cap, int* off, const char* fmt, ...) {
+    if (buf == nullptr || off == nullptr) return;
+    size_t o = (size_t)*off;
+    if (o + 1 >= cap) {           // no room left for even a NUL: stop
+        *off = (int)cap - 1;
+        return;
+    }
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf + o, cap - o, fmt, ap);
+    va_end(ap);
+    if (n < 0) return;            // encoding error: leave buffer as-is
+    if ((size_t)n >= cap - o) {   // output was truncated: clamp and stop
+        *off = (int)cap - 1;
+        return;
+    }
+    *off += n;
+}
 
 // ---------------------------------------------------------------------------
 // Minimal ABI-verified type declarations. These declarations produce the same
@@ -303,67 +338,6 @@ static bool PatchRingBufferIsoType() {
     mprotect(page, (size_t)pg, PROT_READ);
     LOGI("ring-patch: ISO(type5) table entry %u -> %u at %p (base %p)", before, *entry,
          (void*)entry, info.dli_fbase);
-
-    // -----------------------------------------------------------------------
-    // v3.12 RX patch: fix QTI HAL's rejection of incoming HCI ISO packets (type 5).
-    //
-    // Root cause of SSR panic at stream start:
-    // When the Bluetooth controller chip sends an ISO packet on UART RX (e.g. for
-    // CIS status / mic audio / data path ready), UartController::OnDataReady tests
-    // the H4 packet indicator byte against a hardcoded bitmask (0x0012501e).
-    // Bit 5 is 0! So the HAL logs:
-    //   "OnDataReady: Invalid packet type rcvd 0x5"
-    //   "OnDataReady: Out Of Synchronization"
-    //   "SsrCleanup: SSR triggered due to 10 sending special buffer"
-    // -> HAL panics and kills the chip via SSR!
-    //
-    // We patch:
-    // 1. UartController::OnDataReady insn at 0x503d8:
-    //    0x528a03c9 (mov w9, #0x501e) -> 0x528a07c9 (mov w9, #0x503e, bit 5 set!)
-    // 2. HciPacketizer header size table at 0x2f560:
-    //    0 -> 4 (4-byte ISO header)
-    // 3. HciPacketizer jump table at 0x2dd52:
-    //    34 -> 30 (ACL parsing rule: 16-bit payload length at offset 2)
-    // -----------------------------------------------------------------------
-    uint32_t* rx_mask_insn = (uint32_t*)((uintptr_t)info.dli_fbase + 0x503d8);
-    void* rx_page1 = (void*)((uintptr_t)rx_mask_insn & ~(uintptr_t)(pg - 1));
-    if (mprotect(rx_page1, (size_t)pg, PROT_READ | PROT_WRITE) == 0) {
-        if (*rx_mask_insn == 0x528a03c9) {
-            *rx_mask_insn = 0x528a07c9;
-            __builtin___clear_cache((char*)rx_mask_insn, (char*)rx_mask_insn + 4);
-            LOGI("rx-patch: patched valid packet type mask at %p (0x501e -> 0x503e)", rx_mask_insn);
-        }
-        mprotect(rx_page1, (size_t)pg, PROT_READ | PROT_EXEC);
-    } else {
-        LOGE("rx-patch: mprotect rx_page1 failed: %s", strerror(errno));
-    }
-
-    uint64_t* rx_hdr_size = (uint64_t*)((uintptr_t)info.dli_fbase + 0x2f560);
-    void* rx_page2 = (void*)((uintptr_t)rx_hdr_size & ~(uintptr_t)(pg - 1));
-    if (mprotect(rx_page2, (size_t)pg, PROT_READ | PROT_WRITE) == 0) {
-        if (*rx_hdr_size == 0) {
-            *rx_hdr_size = 4;
-            __builtin___clear_cache((char*)rx_hdr_size, (char*)rx_hdr_size + 8);
-            LOGI("rx-patch: patched HciPacketizer header size at %p (0 -> 4)", rx_hdr_size);
-        }
-        mprotect(rx_page2, (size_t)pg, PROT_READ);
-    } else {
-        LOGE("rx-patch: mprotect rx_page2 failed: %s", strerror(errno));
-    }
-
-    uint8_t* rx_jump_entry = (uint8_t*)((uintptr_t)info.dli_fbase + 0x2dd52);
-    void* rx_page3 = (void*)((uintptr_t)rx_jump_entry & ~(uintptr_t)(pg - 1));
-    if (mprotect(rx_page3, (size_t)pg, PROT_READ | PROT_WRITE) == 0) {
-        if (*rx_jump_entry == 34) {
-            *rx_jump_entry = 30;
-            __builtin___clear_cache((char*)rx_jump_entry, (char*)rx_jump_entry + 1);
-            LOGI("rx-patch: patched HciPacketizer jump table at %p (34 -> 30)", rx_jump_entry);
-        }
-        mprotect(rx_page3, (size_t)pg, PROT_READ);
-    } else {
-        LOGE("rx-patch: mprotect rx_page3 failed: %s", strerror(errno));
-    }
-
     return before != kAclEntry;
 }
 
@@ -476,6 +450,46 @@ void* gHookedBinder = nullptr;
 static uint32_t sEvtParcels = 0;
 static uint32_t sCcOpcodeHist[65536] = {0};  // per-opcode CC counts (v3.3g diag)
 static uint32_t sEvtMultApplied = 0;
+static uint32_t sIsoRxForwarded = 0;  // ISO packets rewritten sco->iso (v3.13)
+static uint32_t sIsoRxNoToken = 0;    // parcels whose token could not be patched
+
+// ---------------------------------------------------------------------------
+// v3.13 ISO RX forwarding.
+//
+// The vendor dispatch (patched trampoline in libbluetooth_qti_real.so at
+// 0x3bdec) routes controller ISO packets (HCI type 5) through the callbacks
+// wrapper's vtable slot 0x80 = scoDataReceived (a slot the vendor dispatch
+// never invokes itself), so the packet is marshalled as an ordinary
+// @1.0::IBluetoothHciCallbacks transaction with code 4.
+//
+// We rewrite that outgoing parcel here: the interface token becomes
+// "android.hardware.bluetooth@1.1::IBluetoothHciCallbacks" (same length, one
+// byte differs) and the transaction code becomes 5 (isoDataReceived), so the
+// Bluetooth stack finally receives the ISO RX data it needs to keep the CIS
+// alive. Without it the earbuds time out, the ACL drops, and LE Audio teardown
+// hits the "No such iso connection: 0xffff" assert in btm_iso_impl.h.
+// ---------------------------------------------------------------------------
+static const char kCb10Token[] = "android.hardware.bluetooth@1.0::IBluetoothHciCallbacks";
+
+static bool PatchCbTokenTo11(::android::hardware::Parcel* data) {
+    if (data == nullptr) return false;
+    uint8_t* buf = const_cast<uint8_t*>(data->data());  // parcel body is writable
+    size_t sz = data->dataSize();
+    if (buf == nullptr || sz < 64) return false;
+    const size_t n = sizeof(kCb10Token) - 1;
+    // The interface token is the first object in the parcel; scan a generous
+    // window in case a length prefix precedes the string.
+    size_t limit = sz < n + 128 ? sz - n : n + 128;
+    for (size_t i = 0; i < limit; i++) {
+        if (memcmp(buf + i, kCb10Token, n) != 0) continue;
+        if (buf[i + n] != '\0') continue;  // NUL-terminated in the parcel
+        const size_t verDigit = i + 29;   // "...bluetooth@1.0::..."
+        if (buf[verDigit] != '0') continue;
+        buf[verDigit] = '1';
+        return true;
+    }
+    return false;
+}
 
 static bool MultiplyNcpInBuffer(uint8_t* b, size_t size) {
     bool modified = false;
@@ -511,6 +525,30 @@ int32_t HookedBinderTransact(void* thiz, uint32_t code,
                              const ::android::hardware::Parcel* data,
                              ::android::hardware::Parcel* reply,
                              uint32_t flags, void* onTransactDone) {
+    // v3.13: ISO RX — see PatchCbTokenTo11 above.
+    if (code == 4 && data != nullptr && gOrigBinderTransact != nullptr) {
+        ::android::hardware::Parcel* w =
+            const_cast<::android::hardware::Parcel*>(data);
+        if (PatchCbTokenTo11(w)) {
+            int32_t r = gOrigBinderTransact(thiz, 5, data, reply, flags,
+                                            onTransactDone);
+            if ((++sIsoRxForwarded & 0x7f) == 1) {
+                const uint8_t* db = data->data();
+                size_t sz = data->dataSize();
+                char h[160] = {};
+                int o2 = 0;
+                for (size_t q = 0; q + 16 <= sz && q < 64; q += 8)
+                    hexCat(h, sizeof(h), &o2, "%02x%02x%02x%02x%02x%02x%02x%02x ",
+                           db[q], db[q+1], db[q+2], db[q+3], db[q+4], db[q+5], db[q+6], db[q+7]);
+                LOGI("ISO RX forwarded as isoDataReceived (#%u, %zu bytes): %s",
+                     sIsoRxForwarded, sz, h);
+            }
+            return r;
+        }
+        if (++sIsoRxNoToken == 1)
+            LOGE("ISO RX: code-4 parcel without @1.0::IBluetoothHciCallbacks token (%zu bytes)",
+                 data->dataSize());
+    }
     if (code == 2 && data != nullptr) {  // 2 = IBluetoothHciCallbacks::hciEventReceived
         const uint8_t* buf = data->data();
         size_t sz = data->dataSize();
@@ -547,9 +585,9 @@ int32_t HookedBinderTransact(void* thiz, uint32_t code,
                     static uint32_t sCcDumped = 0;
                     if (sCcDumped < 6 && (opc == 0x2062 || opc == 0x1407 || opc == 0x2058)) {
                         sCcDumped++;
-                        char h[128]; int o2 = 0;
+                        char h[128] = {}; int o2 = 0;
                         for (size_t q = 0; q < bsz && q < 24; q++)
-                            o2 += snprintf(h + o2, sizeof(h) - o2, "%02x ", eb[q]);
+                            hexCat(h, sizeof(h), &o2, "%02x ", eb[q]);
                         LOGI("CC opc=0x%04x dump[%zu]: %s", opc, bsz, h);
                     }
                 }
@@ -558,9 +596,9 @@ int32_t HookedBinderTransact(void* thiz, uint32_t code,
                     static uint32_t s14Dumped = 0;
                     if (bsz >= 2 && eb[0] == 0x14 && s14Dumped < 4) {
                         s14Dumped++;
-                        char h[64]; int o2 = 0;
+                        char h[64] = {}; int o2 = 0;
                         for (size_t q = 0; q < bsz && q < 12; q++)
-                            o2 += snprintf(h + o2, sizeof(h) - o2, "%02x ", eb[q]);
+                            hexCat(h, sizeof(h), &o2, "%02x ", eb[q]);
                         LOGI("evt 0x14 dump[%zu]: %s", bsz, h);
                     }
                 }
@@ -647,16 +685,16 @@ int32_t HookedBinderTransact(void* thiz, uint32_t code,
             }
             // periodic histogram: which event codes flow through hciEventReceived?
             if ((sEvtParcels & 0x3ff) == 0 && anyFlag1) {
-                char h[720]; int off = 0;
-                for (int e = 0; e < 256 && off < (int)sizeof(h) - 24; e++) {
+                char h[720] = {}; int off = 0;
+                for (int e = 0; e < 256; e++) {
                     if (sEvtCodeHist[e])
-                        off += snprintf(h + off, sizeof(h) - off, "%02x:%u ", e, sEvtCodeHist[e]);
+                        hexCat(h, sizeof(h), &off, "%02x:%u ", e, sEvtCodeHist[e]);
                 }
                 LOGI("evt code hist after %u parcels: %s", sEvtParcels, h);
-                char h2[640]; off = 0;
-                for (int o = 0; o < 65536 && off < (int)sizeof(h2) - 20; o++) {
+                char h2[640] = {}; off = 0;
+                for (int o = 0; o < 65536; o++) {
                     if (sCcOpcodeHist[o])
-                        off += snprintf(h2 + off, sizeof(h2) - off, "%04x:%u ", o, sCcOpcodeHist[o]);
+                        hexCat(h2, sizeof(h2), &off, "%04x:%u ", o, sCcOpcodeHist[o]);
                 }
                 LOGI("CC opcode hist: %s", h2);
             }
@@ -854,12 +892,10 @@ int32_t HandleInitialize11(void* self,
         // Decoded on host against the 1.0 interface lib's vtables.
         {
             void** p = (void**)cbObj;
-            char buf[600];
+            char buf[600] = {};
             int off = 0;
-            for (int i = 0; i < 27; i++) {  // 27 * 8 = 216 bytes
-                off += snprintf(buf + off, sizeof(buf) - off, "%llx ", (unsigned long long)p[i]);
-                if (off >= (int)sizeof(buf) - 24) break;
-            }
+            for (int i = 0; i < 27; i++)  // 27 * 8 = 216 bytes
+                hexCat(buf, sizeof(buf), &off, "%llx ", (unsigned long long)p[i]);
             LOGI("wrapper dump [0..26] (216B): %s", buf);
         }
         // Shadow the wrapper's primary vtable and hook hciEventReceived for
@@ -925,12 +961,10 @@ int32_t HandleInitialize11(void* self,
         // the callbacks pointer landed (which sp member holds it).
         {
             void** p = (void**)impl;
-            char buf[512];
+            char buf[512] = {};
             int off = 0;
-            for (int i = 0; i < 32; i++) {
-                off += snprintf(buf + off, sizeof(buf) - off, "%llx ", (unsigned long long)p[i]);
-                if (off >= (int)sizeof(buf) - 24) break;
-            }
+            for (int i = 0; i < 32; i++)
+                hexCat(buf, sizeof(buf), &off, "%llx ", (unsigned long long)p[i]);
             LOGI("impl dump [0..31]: %s", buf);
         }
         // Return<void> layout: bytes[0..3] = return_status enum (0 == OK).
@@ -1119,9 +1153,9 @@ void DumpHciCommandIfInteresting(const ::android::hardware::Parcel& data, uint32
                 sSeen[opcode >> 5] |= (1u << (opcode & 31));
                 if (sSeenLogged < 40) {
                     sSeenLogged++;
-                    char h[128]; int o2 = 0;
+                    char h[128] = {}; int o2 = 0;
                     for (size_t q = 0; q < n && q < 16; q++)
-                        o2 += snprintf(h + o2, sizeof(h) - o2, "%02x ", c[q]);
+                        hexCat(h, sizeof(h), &o2, "%02x ", c[q]);
                     LOGI("hci opcode new: 0x%04x (txcode=%u len=%u): %s", opcode, code,
                          (unsigned)n, h);
                 }
@@ -1130,9 +1164,9 @@ void DumpHciCommandIfInteresting(const ::android::hardware::Parcel& data, uint32
                 DumpCigParamsCommand(c + 3, (size_t)plen <= n - 3 ? plen : n - 3);
             } else if (opcode == 0x2064 || opcode == 0x2065 || opcode == 0x2066 ||
                        opcode == 0x2061 || opcode == 0x2063) {
-                char h[160]; int o2 = 0;
+                char h[160] = {}; int o2 = 0;
                 for (size_t q = 0; q < n && q < 32; q++)
-                    o2 += snprintf(h + o2, sizeof(h) - o2, "%02x ", c[q]);
+                    hexCat(h, sizeof(h), &o2, "%02x ", c[q]);
                 LOGI("LE_CIS_CMD opcode=0x%04x len=%u: %s", opcode, (unsigned)n, h);
             }
         }
@@ -1283,7 +1317,7 @@ void* HIDL_FETCH_IBluetoothHci(const char* name) {
 // Constructor: runs at dlopen() inside the HAL service process
 // ---------------------------------------------------------------------------
 __attribute__((constructor)) static void ShimInit() {
-    LOGI("BluetoothHciHook v3.12 init (ring ISO patch + RX UART/packetizer ISO patch + live credit window)");
+    LOGI("BluetoothHciHook v3.13 init (ring ISO patch + RX UART/packetizer ISO patch + ISO RX forwarding + live credit window)");
     ResolveSymbols();
     RegisterBnConstructorHooks();
 }
