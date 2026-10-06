@@ -498,3 +498,37 @@ b    0x3be10
 ### 操作教训
 不再手动 `mount -o bind` 覆盖 /vendor，只维护模块目录文件，
 由 KernelSU 开机 magic mount（只读）统一生效。
+
+## 2026-10-06 VINTF @1.1 声明：libvintf 实测结论（bootloop 根因）
+
+**根因**：`<hal>` 块写法错误会让 libvintf 解析**整份** device manifest 失败
+（`vintf dm` 输出 0 行 / `Device Manifest? DOES NOT EXIST`），VINTF 检查全拒 → bootloop。
+
+设备侧零写入验证手段（AGENTS.md 允许的临时 bind mount，事后 umount + md5 核对）：
+```bash
+adb shell 'cp /vendor/etc/vintf/manifest_ukee.xml /data/local/tmp/same.xml; chmod 644 /data/local/tmp/same.xml'
+adb shell 'mount --bind /data/local/tmp/same.xml /vendor/etc/vintf/manifest_ukee.xml'
+adb shell 'vintf dm | wc -l'      # 557 = 正常；0 = 解析失败
+adb shell 'umount /vendor/etc/vintf/manifest_ukee.xml; md5sum /vendor/etc/vintf/manifest_ukee.xml'
+```
+（label 差异不是问题：`shell_data_file` bind mount 到 `vendor_configs_file` 目标实测可读；
+内容相同的文件 dm 输出与无挂载时逐行相同。）
+
+| 写法 | `vintf dm` | 说明 |
+|---|---|---|
+| 两个独立 `<hal>` 块（各一个 fqname） | 0 行 | `HalManifest::shouldAdd` 按 major version 去重，同名 package 第二个块被拒并让整份 manifest 失败 |
+| 同一 `<hal>` 块内两个 `<fqname>` | 0 行 | 同上 |
+| `<version-range><min>1.0</min><max>1.1</max>` | 0 行 | `ManifestHal::isValid()` 拒绝同 major 多 minor 的 versions |
+| `<fqname>@1.1::IBluetoothHci/default</fqname>` | 557 行 ✅ | 可用 |
+| `<version>1.1</version>` + `<interface>` | 557 行 ✅ | **采用**（assemble_vintf 标准格式） |
+
+**语义要点**（`system/libvintf` `HalManifest.cpp:149 forEachInstanceOfVersion`）：
+```cpp
+if (manifestInstance.version().minorAtLeast(expectVersion)) return func(manifestInstance);
+```
+查询只按 **major version + interface + instance** 匹配，minor 用 `minorAtLeast`。
+故 device manifest 声明 `@1.1` 即可同时满足 `@1.0` 与 `@1.1` 的 VINTF 查询
+（hwservicemanager `canGet`/`canAdd` 均走此路径）——这也解释了原厂只声明 @1.0 时
+`@1.0` 能注册、而栈侧 `IBluetoothHci_1_1::getService()` 返回 null 的现象。
+
+**当前采用文件**：`leaudio_marble_fix_v2/vendor/etc/vintf/manifest_ukee.xml`，md5 `d600c9c552af2ccae0d0eb3461f40ac1`，12136B，与原厂 diff 仅 bluetooth 块一行。
