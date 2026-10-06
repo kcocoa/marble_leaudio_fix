@@ -27,7 +27,7 @@ module/
 └── vendor/
     ├── lib64/hw/                     （均不入库）
     │   ├── android.hardware.bluetooth@1.0-impl-qti.so   shim，沿用原厂 SONAME
-    │   ├── libbluetooth_qti_real.so                      原厂蓝牙 HAL，4 处补丁
+    │   ├── libbluetooth_qti_real.so                      原厂 impl-qti.so 改 SONAME，4 处补丁
     │   └── audio.bluetooth.default.so                    原厂音频 HAL，2 处补丁
     └── etc/
         ├── le_audio_codec_capabilities.xml               手写（AOSP schema）

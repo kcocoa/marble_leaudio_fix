@@ -11,7 +11,8 @@
 
 - `deploy_module.sh` 安装或更新整个模块，**之后必须重启**。
 - 只改了 shim 时，用下面第 1 节的热更新，不用重启。
-- `dump_device_binaries.sh` 在本模块启用时拒绝运行：此时 `/vendor` 上是模块的文件，导出的不是原厂件。
+- `dump_device_binaries.sh` 默认从 `/vendor` 读，本模块启用时拒绝运行（此时 `/vendor` 上是模块的文件）。
+  这时用 `--from-block`：只读导出整个 vendor 块设备（约 2 GB）到电脑，用 `debugfs` 提取原厂文件。
 
 ### adb 序列号
 

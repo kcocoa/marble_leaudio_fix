@@ -49,7 +49,11 @@ AudioFlinger
 
 **SELinux**：XML 需要 `vendor_configs_file`，so 需要 `vendor_file`（见 operations.md 第 3 节）。
 
-### 2.2 二进制 patch（改原厂 `libbluetooth_qti_real.so`）
+### 2.2 二进制 patch
+
+`libbluetooth_qti_real.so` 就是原厂 `android.hardware.bluetooth@1.0-impl-qti.so`：
+`.dynstr` 里的 SONAME 改成 `libbluetooth_qti_real.so`（原地覆盖、补 NUL，文件大小不变），
+原名让给 shim，shim 再以新名链接它。下表是 SONAME 之外的 4 处补丁。
 
 必须**静态改文件**，不能运行时 `mprotect` 改 `.text`：
 `SELinux: avc: denied { execmem } for ... scontext=hal_bluetooth_default`，运行时改必崩。
