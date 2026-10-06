@@ -14,17 +14,21 @@
 #     `su -c cp` into the module dir so the file inherits vendor_file.
 #  2. Do NOT use `restorecon`: /data/adb is adb_data_file by file_contexts, so
 #     restorecon would put the wrong label straight back. Use `chcon`.
+#  3. Stop the HAL BEFORE overwriting. `cp` rewrites the same inode, which the
+#     running HAL has mmapped: its code changes underneath it and it SIGSEGVs
+#     inside the shim (seen 2026-10-06, tombstone pc in impl-qti.so).
 set -e
 SER=${SER:-$SERIAL}
 MOD=/data/adb/modules/leaudio_marble_fix
 HW=$MOD/vendor/lib64/hw
-SRC=${1:-/tmp/shim_v314.so}
+SRC=${1:-/tmp/leaudio_build/shim_v41.so}
 
 adb -s $SER push "$SRC" /data/local/tmp/shim_new.so
+adb -s $SER shell su -c "stop vendor.bluetooth-1-0-qti"
 adb -s $SER shell su -c "cp /data/local/tmp/shim_new.so $HW/android.hardware.bluetooth@1.0-impl-qti.so"
 adb -s $SER shell su -c "chmod 644 $HW/android.hardware.bluetooth@1.0-impl-qti.so"
 adb -s $SER shell su -c "chcon u:object_r:vendor_file:s0 $HW/android.hardware.bluetooth@1.0-impl-qti.so"
 echo "--- label + md5 (label MUST be vendor_file, md5 must match) ---"
 adb -s $SER shell su -c "ls -Z $HW/ ; md5sum /data/local/tmp/shim_new.so $HW/android.hardware.bluetooth@1.0-impl-qti.so"
-echo "NOTE: no reboot needed for the label to take effect (magic mount follows the source),"
-echo "      but the HAL must be restarted: stop/start vendor.bluetooth-1-0-qti"
+adb -s $SER shell su -c "start vendor.bluetooth-1-0-qti"
+echo "HAL restarted (the stack aborts on serviceDied and restarts by itself; earbuds reconnect)."
