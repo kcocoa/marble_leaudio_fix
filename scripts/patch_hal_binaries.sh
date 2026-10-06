@@ -1,27 +1,26 @@
 #!/usr/bin/env bash
 # patch_hal_binaries.sh — 对 dump 来的原厂 HAL 套用二进制补丁，产出部署用 .so。
 #
-# 输入（未打补丁的原厂文件，先由 scripts/dump_device_binaries.sh 拉取）:
-#   module/vendor/lib64/hw/libbluetooth_qti_real.so
+# 输入（原厂文件，由 scripts/dump_device_binaries.sh 导出）:
+#   module/vendor/lib64/hw/libbluetooth_qti_real.so    原厂 android.hardware.bluetooth@1.0-impl-qti.so
 #   module/vendor/lib64/hw/audio.bluetooth.default.so
-# 输出（就地覆盖，原文件另存 .orig.bak；或 --out-dir 另存）
+# 就地修改，可重复执行（已打过的补丁会跳过）。
 #
 # 用法:
-#   ./scripts/patch_hal_binaries.sh [--out-dir <目录>] [--qti-only | --audio-only]
+#   ./scripts/patch_hal_binaries.sh [--module-dir <路径>] [--qti-only | --audio-only]
 #
 # 机器码均经本机已部署件反汇编校准（llvm-objdump）。
 # 命中不足会中止——ROM/版本不同时不要盲改。
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-V="$HERE/module/vendor/lib64/hw"
-OUTDIR="$V"
+MODDIR="$HERE/module"
 DO_QTI=1
 DO_AUDIO=1
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --out-dir) OUTDIR="$2"; shift 2 ;;
+    --module-dir) MODDIR="$2"; shift 2 ;;
     --qti-only) DO_AUDIO=0; shift ;;
     --audio-only) DO_QTI=0; shift ;;
     -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
@@ -29,7 +28,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-mkdir -p "$OUTDIR"
+V="$MODDIR/vendor/lib64/hw"
 warn() { echo "[!] $*"; }
 ok()   { echo "[✓] $*"; }
 
@@ -39,14 +38,9 @@ if [ "$DO_QTI" = "1" ]; then
   if [ ! -f "$SRC" ]; then
     warn "缺少 $SRC（先跑 scripts/dump_device_binaries.sh）"
   else
-    echo "[*] QTI HAL 补丁（generator: patch_qti_iso_rx.py，4 处静态补丁）"
-    if [ "$OUTDIR" = "$V" ]; then
-      cp -n "$SRC" "$SRC.orig.bak" 2>/dev/null || true
-      python3 "$HERE/patch_qti_iso_rx.py" "$SRC.orig.bak" -o "$SRC"
-    else
-      python3 "$HERE/patch_qti_iso_rx.py" "$SRC" -o "$OUTDIR/libbluetooth_qti_real.so"
-    fi
-    ok "QTI HAL -> $([ "$OUTDIR" = "$V" ] && echo "$SRC" || echo "$OUTDIR/libbluetooth_qti_real.so")"
+    echo "[*] QTI HAL 补丁（patch_qti_iso_rx.py：SONAME 改名 + 4 处 ISO 接收补丁）"
+    python3 "$HERE/patch_qti_iso_rx.py" "$SRC" "$SRC"
+    ok "QTI HAL -> $SRC"
   fi
 fi
 
@@ -57,12 +51,7 @@ if [ "$DO_AUDIO" = "1" ]; then
     warn "缺少 $SRC（先跑 scripts/dump_device_binaries.sh）"
   else
     echo "[*] audio.bluetooth.default.so 补丁（UpdateSinkMetadata 空函数化，2 处）"
-    OUT="$OUTDIR/audio.bluetooth.default.so"
-    if [ "$OUTDIR" = "$V" ]; then
-      [ "$OUT" = "$SRC" ] && cp -n "$SRC" "$SRC.orig.bak" 2>/dev/null || true
-      SRC="$SRC.orig.bak"
-    fi
-    cp "$SRC" "$OUT"
+    OUT="$SRC"
     python3 - "$OUT" <<'PY'
 import sys
 

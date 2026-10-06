@@ -16,12 +16,15 @@ sw && /sample rate:/ {
     sub(/.*data_interval_us: /, "", itv); sub(/,.*/, "", itv);
     sw=0
 }
-found && /Num of devices:/ { dev=$0; sub(/.*Num of devices:[ \t]*/, "", dev) }
+/^[ \t]*== Active Groups:/ { in_active=1 }
+/^[ \t]*== Inactive Groups:/ { in_active=0 }
+found && in_active && /Num of devices:/ { dev=$0; sub(/.*Num of devices:[ \t]*/, "", dev) }
 found && /id \| active/ { show_ase=1; next }
 show_ase && /^[ \t]*[0-9]+/ {
     if ($2 == "true") {
         ase_info = ase_info "\n    - ASE " $1 " [" $3 "]: cis=" $4 " handle=" $6 " sdu=" $7 "B latency=" $8 "ms rtn=" $9 " (" $10 ")"
         last_sdu = $7
+        n_stream++
     }
 }
 found && /CIS Connection handle:/ {
@@ -40,7 +43,10 @@ END {
     if (last_sdu > 0 && itv > 0) {
         br = (last_sdu * 8) / (itv / 1000)
         print "单帧载荷 (SDU):    " last_sdu " 字节"
-        print "音频码率 (Bitrate):" br " kbps/耳 (双耳立体声 " (br * chan) " kbps)"
+        if (n_stream > 0)
+            print "音频码率 (Bitrate):" br " kbps/耳（" n_stream " 路，合计 " (br * n_stream) " kbps）"
+        else
+            print "音频码率 (Bitrate):" br " kbps/耳"
     }
     if (ase_info != "") {
         print "活跃流通道 (ASEs): " ase_info

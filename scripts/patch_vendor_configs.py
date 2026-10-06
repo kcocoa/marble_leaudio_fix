@@ -10,6 +10,8 @@
      其他写法会让 libvintf 解析失败导致 bootloop，见 docs/root-causes.md 第 6 节）
   2. 音频策略: 追加 bluetooth 模块（A2DP / 助听器 / BLE 输出 + BLE 输入）。
      BLE 输入必须声明，否则 LE Audio 设备在 AudioPolicy 中不可用（docs/dead-ends.md 第 6 节）
+  3. 音频策略: 去掉 primary 模块 "A2DP In" 端口的 encodedFormats="AUDIO_FORMAT_LC3"
+     （原厂为高通硬件 offload 所写；与已验证可用的配置保持一致）
 
 就地修改，可重复执行（已改过的文件跳过）；结构与预期不符时中止，不做猜测性修改。
 
@@ -110,18 +112,30 @@ def patch_manifest(path):
     print(f"[✓] IBluetoothHci @1.0 -> @1.1: {path}")
 
 
+A2DP_IN_LC3 = re.compile(r'(<devicePort tagName="A2DP In"[^>]*?)\s+encodedFormats="AUDIO_FORMAT_LC3"')
+
+
 def patch_policy(path):
     s = open(path, encoding="utf-8").read()
     if '<module name="bluetooth"' in s:
-        if 'tagName="BLE Headset In"' in s:
-            print(f"[=] 已含 bluetooth 模块，跳过: {path}")
-            return
-        die(f"{path}: 原文件已有不同的 bluetooth 模块，需手动合并")
-    if s.count("</modules>") != 1:
-        die(f"{path}: 未找到唯一的 </modules>")
-    s = s.replace("</modules>", BT_MODULE + "    </modules>")
+        if 'tagName="BLE Headset In"' not in s:
+            die(f"{path}: 原文件已有不同的 bluetooth 模块，需手动合并")
+        print("[=] 已含 bluetooth 模块，跳过")
+    else:
+        if s.count("</modules>") != 1:
+            die(f"{path}: 未找到唯一的 </modules>")
+        s = s.replace("</modules>", BT_MODULE + "    </modules>")
+        print("[✓] 追加 bluetooth 模块")
+    n = len(A2DP_IN_LC3.findall(s))
+    if n > 1:
+        die(f'{path}: "A2DP In" 端口不唯一')
+    if n == 1:
+        s = A2DP_IN_LC3.sub(r"\1", s)
+        print('[✓] 去掉 "A2DP In" 的 LC3 encodedFormats')
+    else:
+        print('[=] "A2DP In" 无 LC3 encodedFormats，跳过')
     open(path, "w", encoding="utf-8").write(s)
-    print(f"[✓] 追加 bluetooth 模块: {path}")
+    print(f"[✓] 音频策略: {path}")
 
 
 def main():

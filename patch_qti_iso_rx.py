@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""Patch libbluetooth_qti_real.so: route vendor-dropped HCI ISO packets (type 5)
-through the IBluetoothHciCallbacks::scoDataReceived vtable slot (0x80).
+"""Build libbluetooth_qti_real.so from the stock QTI HAL
+(android.hardware.bluetooth@1.0-impl-qti.so): rename its SONAME and route
+vendor-dropped HCI ISO packets (type 5) through the
+IBluetoothHciCallbacks::scoDataReceived vtable slot (0x80). Idempotent.
 
 Root cause
 ----------
@@ -73,53 +75,64 @@ INSTRUCTIONS = [
     struct.pack('<I', 0x14000000 | ((CLEANUP - (TRAMPOLINE_OFF + 32)) // 4)),
 ]
 
-ORIGINAL_BYTES = bytes.fromhex('21fffff0f0fffff0f0fffff0'  # adrp x1/x2/x3
-                               '21820991038c3291'          # add x1, x2, x3
-                               'c0000060'                  # mov w0, #6
-                               'e403152a'                  # mov w4, w21
-                               '95 da 01 94'.replace(' ', ''))  # bl __android_log_print
+
+# Stock ships this library as android.hardware.bluetooth@1.0-impl-qti.so; the
+# shim takes over that name and loads the stock code as libbluetooth_qti_real.so.
+SONAME_FROM = b'android.hardware.bluetooth@1.0-impl-qti.so'
+SONAME_TO   = b'libbluetooth_qti_real.so'
+
+
+def patch(blob: bytearray, off: int, old: bytes, new: bytes, what: str) -> None:
+    """Idempotent: already-patched bytes are left alone, anything else aborts."""
+    cur = bytes(blob[off:off + len(new)])
+    if cur == new:
+        print(f'  [=] {what} @ {hex(off)}')
+    elif cur == old:
+        blob[off:off + len(new)] = new
+        print(f'  [+] {what} @ {hex(off)}: {old.hex()} -> {new.hex()}')
+    else:
+        raise SystemExit(f'unexpected bytes at {hex(off)} ({what}): {cur.hex()}')
 
 
 def main() -> None:
-    src = sys.argv[1]
-    dst = sys.argv[2]
+    if len(sys.argv) != 3:
+        raise SystemExit(f'usage: {sys.argv[0]} <stock impl-qti.so> <out.so>')
+    src, dst = sys.argv[1], sys.argv[2]
     with open(src, 'rb') as f:
         blob = bytearray(f.read())
 
+    # 0) SONAME (.dynstr; the string occurs exactly once)
+    pad = SONAME_TO + b'\0' * (len(SONAME_FROM) - len(SONAME_TO))
+    n_old, n_new = blob.count(SONAME_FROM + b'\0'), blob.count(SONAME_TO + b'\0')
+    if n_old == 1 and n_new == 0:
+        off = blob.index(SONAME_FROM + b'\0')
+        blob[off:off + len(pad)] = pad
+        print(f'  [+] SONAME @ {hex(off)} -> {SONAME_TO.decode()}')
+    elif n_old == 0 and n_new == 1:
+        print('  [=] SONAME')
+    else:
+        raise SystemExit(f'SONAME not found exactly once (old={n_old}, new={n_new})')
+
     # 1) RX patches (UART mask + packetizer tables)
-    off = RX_MASK_OFF
-    got = struct.unpack_from('<I', blob, off)[0]
-    if got != RX_MASK_FROM:
-        raise SystemExit(f'unexpected bytes at {hex(off)}: {hex(got)}')
-    struct.pack_into('<I', blob, off, RX_MASK_TO)
-    got = struct.unpack_from('<Q', blob, RX_HDR_OFF)[0]
-    if got != 0:
-        raise SystemExit(f'unexpected bytes at {hex(RX_HDR_OFF)}: {hex(got)}')
-    struct.pack_into('<Q', blob, RX_HDR_OFF, RX_HDR_TO)
-    if blob[RX_JUMP_OFF] != RX_JUMP_FROM:
-        raise SystemExit(f'unexpected byte at {hex(RX_JUMP_OFF)}: {blob[RX_JUMP_OFF]}')
-    blob[RX_JUMP_OFF] = RX_JUMP_TO
+    patch(blob, RX_MASK_OFF, struct.pack('<I', RX_MASK_FROM), struct.pack('<I', RX_MASK_TO), 'RX mask')
+    patch(blob, RX_HDR_OFF, struct.pack('<Q', 0), struct.pack('<Q', RX_HDR_TO), 'RX hdr size')
+    patch(blob, RX_JUMP_OFF, bytes([RX_JUMP_FROM]), bytes([RX_JUMP_TO]), 'RX jump')
 
-    # 2) ISO RX trampoline
-    off = TRAMPOLINE_OFF
-    # sanity: the original error block starts with "adrp x1, 0x22000"
-    expected = bytes.fromhex('21fffff0')
-    if bytes(blob[off:off + 4]) != expected:
-        raise SystemExit(f'unexpected bytes at {hex(off)}: {blob[off:off+4].hex()}')
-
+    # 2) ISO RX trampoline (replaces the "Unexpected event type" error block)
     payload = b''.join(INSTRUCTIONS)
     assert len(payload) == TRAMPOLINE_LEN, (len(payload), TRAMPOLINE_LEN)
-    blob[off:off + TRAMPOLINE_LEN] = payload
+    cur = bytes(blob[TRAMPOLINE_OFF:TRAMPOLINE_OFF + TRAMPOLINE_LEN])
+    if cur == payload:
+        print(f'  [=] trampoline @ {hex(TRAMPOLINE_OFF)}')
+    elif cur[:4] == bytes.fromhex('21fffff0'):  # original block starts with adrp x1
+        blob[TRAMPOLINE_OFF:TRAMPOLINE_OFF + TRAMPOLINE_LEN] = payload
+        print(f'  [+] trampoline @ {hex(TRAMPOLINE_OFF)} ({TRAMPOLINE_LEN} bytes)')
+    else:
+        raise SystemExit(f'unexpected bytes at {hex(TRAMPOLINE_OFF)}: {cur[:4].hex()}')
 
     with open(dst, 'wb') as f:
         f.write(blob)
     print(f'patched {src} -> {dst}')
-    print(f'  RX mask     @ {hex(RX_MASK_OFF)}: {hex(RX_MASK_FROM)} -> {hex(RX_MASK_TO)}')
-    print(f'  RX hdr size @ {hex(RX_HDR_OFF)}: 0 -> {RX_HDR_TO}')
-    print(f'  RX jump     @ {hex(RX_JUMP_OFF)}: {RX_JUMP_FROM} -> {RX_JUMP_TO}')
-    print(f'  trampoline at {hex(TRAMPOLINE_OFF)} ({TRAMPOLINE_LEN} bytes):')
-    for i in range(0, TRAMPOLINE_LEN, 4):
-        print(f'    {hex(TRAMPOLINE_OFF + i)}: {payload[i:i+4].hex()}')
 
 
 if __name__ == '__main__':
