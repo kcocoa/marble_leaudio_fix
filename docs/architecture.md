@@ -142,18 +142,13 @@ $T/clang++ --target=aarch64-linux-android24 -shared -fPIC -O2 -std=c++17 -Ibuild
 
 ## 4. shim 运行时开关（`persist.vendor.leaudio.*`）
 
-标 *缓存* 的在首次使用后缓存（`static`），改完需 `stop/start vendor.bluetooth-1-0-qti`；
+只剩两个。标 *缓存* 的在首次加载后缓存（`static`），改完需 `stop/start vendor.bluetooth-1-0-qti`；
 标 *实时* 的每次下发 `LE Set CIG Parameters` 时重读，`setprop` 后暂停→播放（CIG 重建）即可。
 
 | 属性 | 默认 | 读取 | 作用 |
 |---|---|---|---|
-| `cig.maxlat` | 10 | 实时 | v4.1 把 `0x2062` 的 Max_Transport_Latency 截到 N ms（0=关）。不截时控制器选 `ISO_Interval=40ms`、传输延迟 84.57ms，流建立瞬间丢 6–8 包；截到 10ms → 10ms / 7.21ms、零丢包。**仍然必要** |
-| `cig.maxrtn` | -1（关） | 实时 | 截 RTN（每 CIS 的 rtn 字段）。实测缩短 CIG 事件对吞吐无帮助，只会降低空口可靠性，保持关闭 |
-| `ncpsynth` | **0** | 缓存 | 合成 NCP。**必须为 0**：合成 credit 会让栈超出控制器缓冲数发包 → 控制器挂死（root-causes 第 9 节） |
-| `iso.strip4` | **0** | 缓存 | 剥掉 HCI ISO 头里的 `Packet_Sequence_Number`+`ISO_SDU_Length`。**必须为 0**：那是规范强制字段（root-causes 第 8 节更正）。v4.0 起属性缺失时默认 0 |
-| `isocred.window` | 12 | 实时 | 仅在 `ncpsynth=1` 时有意义 |
-| `iso.patchring` | 1 | 缓存 | ring buffer type-5 补丁 |
-| `isocred.mult` | 1 | 实时 | 早期乘法式 NCP —— **已知会下溢，勿用**；v4.0 起默认 1（关） |
+| `iso.patchring` | 1 | 缓存 | ring buffer type-5 补丁：QTI HAL 的 `PacketBuff::AddBuffNode` 分发表把 type 5 当成错误路径，ISO 包全被丢弃。必须为 1 |
+| `cig.maxlat` | 10 | 实时 | 把 `0x2062` 的 Max_Transport_Latency 截到 N ms（0=关）。实测必要，见下 |
 
 `cig.maxlat=10` 的实测依据（00680 固件 + 已打补丁的 HAL，数据取自 btsnoop 里的 `LE CIS Established` 事件）：
 
@@ -162,10 +157,20 @@ $T/clang++ --target=aarch64-linux-android24 -shared -fPIC -O2 -std=c++17 -Ibuild
   之间 credit 恒为 0。
 - **截到 10ms**：`10ms` / `7210µs`、in-flight 8/22、零丢包。
 
-> v4.0 的 ISO credit 代理（`isoproxy`、`isoproxy.qmax`）已在 v4.4 **删除**。它是为原厂 00570
-> （3 个 ISO 缓冲）设计的，而模块自带 00680 固件（22 个缓冲），协议栈自身的 credit 记账已经够用：
-> 删除前后 CIS 参数完全相同（10ms / 7210µs）、连续播放零丢包、NCP 逐包回报且 handle 正确。
-> 删除后控制器缓冲数改用 btsnoop 读（见 `operations.md`）。
+### 已删除的实验开关
+
+00570 时期加过一批开关，实测都无用（默认值下对应代码路径永不走到），v4.4 / v4.5 已连同代码全部删除：
+
+| 曾用属性 | 结论 |
+|---|---|
+| `isoproxy`、`isoproxy.qmax` | credit 代理，为 00570 的 3 个缓冲设计；00680 有 22 个，协议栈自身记账够用（删除前后 CIS 参数完全相同、零丢包） |
+| `ncpsynth` | 合成 NCP 会让栈超出控制器缓冲数发包 → 控制器挂死 → SSR（`root-causes.md` 第 9 节） |
+| `isocred.mult` | 放大 NCP 完成数 → 栈的 credit 计数下溢 → 大量超发 → 控制器 Hardware Error（`dead-ends.md`） |
+| `isocred.window` | 只在 `ncpsynth=1` 时有意义 |
+| `iso.strip4` | 那 4 字节是 HCI 规范强制的 `Packet_Sequence_Number`+`ISO_SDU_Length`，剥掉会产生畸形包（`root-causes.md` 第 8 节） |
+| `cig.maxrtn` | 截 RTN 对吞吐无帮助，只会降低空口可靠性 |
+
+删掉后控制器缓冲数改用 btsnoop 读（见 `operations.md`）。
 
 ## 5. AArch64 / HIDL ABI 硬知识
 

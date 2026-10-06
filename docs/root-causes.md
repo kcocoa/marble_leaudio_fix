@@ -318,7 +318,7 @@ A2DP 为 STOPPED → `audio_get_codec_config` 返回空（`cbz x0, 0xc5c44`）�
 
 ---
 
-## 8. HCI ISO 包头的 4 字节不能剥（`iso.strip4` 必须为 0）
+## 8. HCI ISO 包头的 4 字节不能剥（曾用开关 `iso.strip4`，已删除）
 
 HCI ISO 数据包里 handle/长度之后的 `[2B 序号][2B 长度]` 是 HCI 规范强制的
 `Packet_Sequence_Number` + `ISO_SDU_Length`（Core Spec Vol 4 Part E §5.4.5，PB=0b00/0b10 时必须存在），
@@ -326,11 +326,11 @@ HCI ISO 数据包里 handle/长度之后的 `[2B 序号][2B 长度]` 是 HCI 规
 在 shim 里加了 `iso.strip4` 剥掉它。
 
 剥掉会产生畸形包（PB=3 续片还会被误剥掉 4 字节音频）；实测 `strip4=0` 时包结构正确，
-当时的崩溃依旧 —— 崩溃真因见第 9 节。**`strip4` 必须为 0。**
+当时的崩溃依旧 —— 崩溃真因见第 9 节。**这 4 字节永远不能剥，该开关及代码已在 v4.5 删除。**
 
 ---
 
-## 9. 合成 NCP（`ncpsynth=1`）让控制器缓冲溢出 → 控制器挂死 → SSR（固件 00570）
+## 9. 合成 NCP（曾用开关 `ncpsynth=1`）让控制器缓冲溢出 → 控制器挂死 → SSR（固件 00570）
 
 **证据（btsnoop + A/B 实测）**：
 
@@ -346,7 +346,7 @@ HCI ISO 数据包里 handle/长度之后的 `[2B 序号][2B 长度]` 是 HCI 规
 | `strip4=0 ncpsynth=1` | 照崩（2 次） |
 | `strip4=0 ncpsynth=0` | **不崩**，STREAMING 持续 10+ 分钟，ISO RX 200/s |
 
-**修复**：`system.prop` 中 `ncpsynth=0`、`strip4=0`。
+**修复**：当时的做法是把 `ncpsynth`、`strip4` 置 0；这两个开关及对应代码后来在 v4.5 删除了。
 
 ### 9.1 剩余问题：吞吐上限 150/s → 约 25% 丢帧（卡顿）
 
@@ -394,7 +394,8 @@ HCI ISO 数据包里 handle/长度之后的 `[2B 序号][2B 长度]` 是 HCI 规
    └─ 走到了 offload 路径 → system.prop 没关 offload（根因 7）
 
 8. on_hci_timeout READ_CLOCK(0x1407) + UART err 0x51 + SSR，且起流后 ~2s 发生 ?
-   └─ 查 persist.vendor.leaudio.ncpsynth 是否为 0（根因 9）；strip4 也应为 0（根因 8）
+   └─ 根因 9（当时是合成 NCP 造成的；该代码已删）。先确认固件与 ring 补丁：
+      `0x2060` 应返回 22 个缓冲，日志里应有 `ring-patch: ISO(type5) table entry`
 
 9. 不崩但卡顿 / 丢包 → 先看协议栈有没有 `dropping ISO`（`iso credits: 0`）：
    └─ 有 → credit 被打光：确认固件是 00680（`0x2060` 应返回 22 个缓冲，根因 12、13）
@@ -433,7 +434,7 @@ HCI ISO 数据包里 handle/长度之后的 `[2B 序号][2B 长度]` 是 HCI 规
 
 ## 12. 固件 00570：3 缓冲 × 2 周期流水线 = 150/s 硬上限
 
-**测量（shim 内打点，旧固件 00570，maxrtn=-1）**：
+**测量（shim 内打点，旧固件 00570，maxrtn=-1；该打点随 credit 代理在 v4.4 删除）**：
 
 ```
 hold(send->NCP) avg=19880us max=24936us n=750, send call avg=128us
