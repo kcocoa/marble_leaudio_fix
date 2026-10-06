@@ -532,3 +532,40 @@ if (manifestInstance.version().minorAtLeast(expectVersion)) return func(manifest
 `@1.0` 能注册、而栈侧 `IBluetoothHci_1_1::getService()` 返回 null 的现象。
 
 **当前采用文件**：`leaudio_marble_fix_v2/vendor/etc/vintf/manifest_ukee.xml`，md5 `d600c9c552af2ccae0d0eb3461f40ac1`，12136B，与原厂 diff 仅 bluetooth 块一行。
+
+## 2026-10-06 v3.14：shim hexdump 缓冲区溢出（播放必崩根因）
+
+**现象**：@1.1 manifest 生效后（`vintf dm` 已见 `@1.1::IBluetoothHci/default`，
+设备正常启动无 bootloop），一连耳机播放 HAL 就 SIGABRT，`logcat -b crash` 计 7 次，
+蓝牙栈自动重启后每次播放再崩。
+
+**tombstone（HAL pid 10933）**：
+```
+__fortify_fatal <- snprintf <- shim+0x7284
+  <- android.hardware.bluetooth@1.0.so _hidl_scoDataReceived
+  <- libbluetooth_qti_real.so BluetoothHci::initialize()::$_1  (0x3be08)
+  <- DataHandler::OnPacketReady <- UartController::OnPacketReady
+  <- HciPacketizer::OnDataReady <- UartController::OnDataReady
+```
+栈侧连锁：`system/gd/hal/hci_backend_hidl.cc:83 serviceDied: The Bluetooth HAL died.`
+
+**根因**：`BluetoothHciHook.cpp` ISO RX 日志，`char h[96]` + 循环 7 轮 × 17 字符 = 119 > 96。
+`snprintf` 返回"本应写入长度"而非实际写入数：第 6 轮截断后 `o2` 仍 +17 → 102，
+第 7 轮 `sizeof(h) - 102` 下溢为 `(size_t)-6` → bionic FORTIFY → `__fortify_fatal`。
+反汇编铁证：`sub x1, x27, x9`(size=96-o2) / `add x0, x26, x9`(dst=h+o2) /
+`add w23, w0, w23`(o2+=返回值) / `mov w27, #0x60`。
+
+**附带结论（重要）**：崩溃栈本身证明 **ISO RX 全链路已通** ——
+`HciPacketizer::OnDataReady` 的 type-5 包经蹦床（`cmp w21,#5` 分支）到达
+`_hidl_scoDataReceived`，且 shim `HookedBinderTransact` 走进了 `code==5`
+转发分支（崩在 `sIsoRxForwarded` 计数处）。只差这段日志改对。
+
+**修复（方案 A+B，commit `94125d6`）**：
+- 新增 `hexCat()`：先 `off+1 < cap` 保证 `size = cap - off >= 2` 永为正，
+  再按返回值 clamp 到 `cap-1` 并 stop
+- `h[96]` → `h[160]`
+- 全部 9 处 hexdump 统一改 `hexCat`；所有缓冲区 `= {}` 初始化
+- 产物 `/tmp/shim_v314.so`，md5 `ea155cdbda8d4af27dd9625054565fb3`
+
+**验证**：本地 C 复现 cap=96/128/160/64/17 均不越界；反汇编确认 shim 内仅剩
+hexCat 内一处 `vsnprintf`。
