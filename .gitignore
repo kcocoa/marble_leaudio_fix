@@ -1,4 +1,4 @@
-# 二进制 / 构建产物（可从设备提取或按 README 重新构建）
+# 二进制 / 构建产物（由 scripts/ 下载、设备 dump 或本地构建产生）
 *.so
 *.o
 *.zip
@@ -8,6 +8,8 @@
 *.log
 *.csv
 *.png
+*.so.*
+*.orig.bak
 bluetooth_hci_shim/android.hardware.bluetooth@*
 
 # 手机侧内容一律不入库：
@@ -18,6 +20,7 @@ bluetooth_hci_shim/android.hardware.bluetooth@*
 monitor_runs/
 firmware_dump/
 viz/
+build/
 leaudio_marble_fix_v2/vendor/etc/audio/
 leaudio_marble_fix_v2/vendor/etc/vintf/
 leaudio_marble_fix_v2/vendor/etc/bluetooth/

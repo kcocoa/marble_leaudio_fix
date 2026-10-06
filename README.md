@@ -20,11 +20,15 @@
 bluetooth_hci_shim/BluetoothHciHook.cpp   核心：QTI HAL 的 HIDL 1.1 shim（v4.1，★ 库内唯一源码）
 bluetooth_hci_shim/BluetoothHciShim.cpp   早期尝试（已被 HciHook 取代）
 leaudio_marble_fix_v2/                    KernelSU 模块（仅文本：system.prop / post-fs-data / service / codec XML；
-                                          二进制与设备提取的 vendor XML/JSON 一律不入库，见 .gitignore）
+                                          二进制与设备提取的 vendor XML/JSON 由 scripts/ 获取，不入库）
 leaudio_iterate.sh                        部署 / 回滚 / 监测 / 音乐测试 / 状态
 leaudio_monitor.sh                        事件触发式全量快照监测器
 leaudio_monitor_analyze.py                监测数据分析器（崩溃时间线 + 速率 + 关联）
 deploy_shim.sh                            整模块部署
+scripts/fetch_upstream_firmware.sh   上游取固件（多源回退 + md5 校验）
+scripts/dump_device_binaries.sh      从自己设备 dump 厂商 HAL / vendor XML / 构建基件
+scripts/patch_hal_binaries.sh        套 HAL 字节补丁（机器码经反汇编校准）
+scripts/build_shim.sh                NDK30 一键编译 shim .so
 TODO.md                                   累积的调查记录（含 bootloop 事故复盘）
 LEAUDIO_MARBLE_INVESTIGATION.md           早期调查笔记
 monitor_runs/                             手机日志衍生数据，已移出仓库（.gitignore 排除）
@@ -36,7 +40,30 @@ docs/                                     ★ 现行文档（先读这里）
   operations.md                           部署 / 重启 / 救援流程 + 两次事故复盘
 ```
 
+## 获取外来源二进制（公开仓库不含任何外来 .so/.tlv）
+
+本仓库只跟踪文本与脚本；固件、厂商 HAL、设备提取的 vendor 配置一律由下列脚本在
+**你自己的设备/上游**上获取，产物落在 `.gitignore` 排除区：
+
+```bash
+# 1) 上游固件（高通官方 linux-firmware，ISO 缓冲 3 -> 22，必需）
+./scripts/fetch_upstream_firmware.sh
+
+# 2) 从设备 dump 厂商二进制 + vendor 配置基线（需要 su）
+SERIAL=<你的 adb 序列号> ./scripts/dump_device_binaries.sh --with-build-deps
+
+# 3) 对 dump 来的两个 HAL 打补丁（机器码偏移见 docs/architecture.md §2.2）
+./scripts/patch_hal_binaries.sh
+
+# 4) 构建并部署 shim
+./scripts/build_shim.sh && ./leaudio_iterate.sh deploy /tmp/leaudio_build/shim.so
+```
+
+各脚本的动机、字节级依据与失败回退见脚本头部注释。
+
 ## 构建 shim
+
+（本节为手动构建参考；一键版见 `scripts/build_shim.sh`，外来源二进制获取见上文）
 
 ```bash
 NDK=/opt/android-sdk/ndk/30.0.16248370
@@ -51,7 +78,12 @@ $NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip --strip-all /tmp/shim.
 ```
 
 `libbluetooth_qti_real.so`（厂商真实 HAL，618KB）需放在模块的 `vendor/lib64/hw/` 下，
-shim 通过 `dlopen` 加载它。该二进制不入库（可从设备 `/vendor/lib64/hw/` 提取）。
+shim 通过 `dlopen` 加载它。取得方式（不入库）：
+
+```bash
+SERIAL=<你的 adb 序列号> ./scripts/dump_device_binaries.sh   # 设备 dump
+./scripts/patch_hal_binaries.sh                             # 打 4 处补丁
+```
 
 ---
 

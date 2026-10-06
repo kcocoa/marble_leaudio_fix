@@ -4,6 +4,21 @@
 
 ---
 
+## 0. 公开仓库用户：先备齐外来源二进制
+
+本仓库不含任何厂商二进制/固件/设备提取配置。工作副本缺少下列产物时，按序执行：
+
+```bash
+./scripts/fetch_upstream_firmware.sh                          # 上游固件（必需）
+SERIAL=<你的 adb 序列号> ./scripts/dump_device_binaries.sh     # 设备 dump HAL + vendor 配置
+./scripts/patch_hal_binaries.sh                              # 打字节补丁
+./scripts/build_shim.sh                                      # 编译 shim
+```
+
+以上产物均被 `.gitignore` 排除；详见脚本头注释与 `docs/architecture.md` §2.2/§3。
+
+---
+
 ## 1. 部署 shim（唯一正确姿势）
 
 ```bash
