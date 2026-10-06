@@ -4,12 +4,14 @@
 
 原厂状态下本机无法使用 LE Audio。
 
-## 效果
+## 实测效果
 
-以下耳机测试成功连接，以 **192 kbps LC3**（2-channel，每声道 96 kbps，10 ms 帧，120 B）播放正常：
+作者手上只有两副 LE Audio 耳机，用它们验证连接与播放；模块不针对具体型号做适配：
 
 - Furina Endless Solo of Solitude-LEA（弱水时砂芙宁娜不休独舞耳机）
 - ZZZ-ANGELS-OWS-LEA（水月雨妄想天使耳机）
+
+以 **192 kbps LC3**（2-channel，每声道 96 kbps，10 ms 帧，120 B）播放正常。
 
 ## 适用范围
 
@@ -18,7 +20,7 @@
 | 设备 | Redmi Note 12 Turbo（`marble`，SM7475，`ro.boot.product.vendor.sku=ukee`） |
 | 系统 | LineageOS 23.2 / Android 16 |
 | Root | KernelSU，并已安装一个挂载用的**元模块**（metamodule，如官方 `meta-overlayfs`） |
-| 耳机 | LE Audio 单播耳机（已测试型号见上文） |
+| 耳机 | LE Audio 单播（unicast）耳机 |
 
 本模块要用 overlay 替换 `/vendor` 下的文件，而 KernelSU 本身不负责挂载模块文件，这一步由元模块完成。
 没有元模块时，模块可以安装，但 vendor 文件不会生效。
@@ -72,3 +74,4 @@ docs/                    技术文档
 - [`docs/root-causes.md`](docs/root-causes.md)：各问题的根因与证据
 - [`docs/dead-ends.md`](docs/dead-ends.md)：试过但走不通的方案
 - [`docs/operations.md`](docs/operations.md)：部署、调试、救援
+- [`TODO.md`](TODO.md)：待验证事项

@@ -122,7 +122,7 @@ mount -o bind $MODDIR/firmware/hpbtfw21.tlv /vendor/bt_firmware/image/hpbtfw21.t
 | 路径 | 作用 / 来源 |
 |---|---|
 | `build/inc/__config_site` | 脚本自动从 NDK 生成：把 `_LIBCPP_ABI_NAMESPACE __ndk1` 改成 `__1`（设备 libc++ 只有 `std::__1`；`-D` 覆盖无效） |
-| `build/inc/hidl/ConcurrentMap.h` | 手动取自 AOSP `system/libhidl/transport/include/hidl/ConcurrentMap.h`（只依赖 `<mutex>` `<map>`） |
+| `build/inc/hidl/ConcurrentMap.h` | 取自 AOSP `system/libhidl/transport/include/hidl/ConcurrentMap.h`（只依赖 `<mutex>` `<map>`）；缺失时脚本自动从 `android.googlesource.com` 下载 |
 | `build/lib/{libhidlbase,libutils,libc++}.so` | `dump_device_binaries.sh --with-build-deps` 从设备 `/system/lib64/` 导出 |
 | `module/vendor/lib64/hw/libbluetooth_qti_real.so` | 打过补丁的原厂 HAL |
 
@@ -156,6 +156,8 @@ $T/clang++ --target=aarch64-linux-android24 -shared -fPIC -O2 -std=c++17 -Ibuild
 | `isocred.window` | 12 | 实时 | 仅在 `ncpsynth=1` 时有意义 |
 | `iso.patchring` | 1 | 缓存 | ring buffer type-5 补丁 |
 | `isocred.mult` | 1 | 实时 | 早期乘法式 NCP —— **已知会下溢，勿用**；v4.0 起默认 1（关） |
+
+其中 `isoproxy` 与 `cig.maxlat` 是否仍需要未验证，见仓库根目录 `TODO.md`。
 
 ## 5. AArch64 / HIDL ABI 硬知识
 

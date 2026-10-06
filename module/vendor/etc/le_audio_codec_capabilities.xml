@@ -13,11 +13,12 @@
       BTAudioClientAIDL: FetchAudioProvider: SessionType=... Not supported by BluetoothAudioHal
 
   Schema follows AOSP hardware/interfaces/bluetooth/audio/utils/le_audio_codec_capabilities/
-  le_audio_codec_capabilities.xml. Values cover what the ROSELINK earbuds advertise
-  (8/16/24/32/48 kHz, 7.5/10 ms, up to 155 octets per codec frame) so the offload
-  (controller-side LC3 encoding) data path can be selected instead of the host
-  (software) path, which is unusable on this firmware: the QTI UART/daemon transport
-  cannot carry HCI ISO packets and the controller asserts ~90 ms after the first one.
+  le_audio_codec_capabilities.xml. Values are the generic LC3 set (8/16/24/32/48 kHz,
+  7.5/10 ms, up to 155 octets per codec frame).
+
+  Note: the module currently disables offload (persist.bluetooth.leaudio_offload.disabled=1)
+  and uses host-side (software) LC3 encoding, so whether this file is still read is
+  unverified -- see TODO.md.
 -->
 <leAudioOffloadSetting>
   <scenarioList>
