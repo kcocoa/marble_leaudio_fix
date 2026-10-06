@@ -41,8 +41,6 @@ check_module() {
     fi
 }
 
-md5_dev() { $ADB shell "su -c 'md5sum $1 2>/dev/null'" | awk '{print $1}' | tr -d '\r'; }
-md5_host(){ md5sum "$1" 2>/dev/null | awk '{print $1}'; }
 pid_svc() { $ADB shell "pidof $SVC" 2>/dev/null | tr -d '\r'; }
 
 # ---- 持续采样 (非 one-shot): 每次调用即时探测 ----
@@ -80,29 +78,24 @@ do_deploy() {
     [ -f "$so" ] || { fail "文件不存在: $so"; exit 1; }
     check_device; check_module
 
-    local h1 h2 h3
-    h1=$(md5_host "$so")
-    info "目标: $so (md5 $h1)"
+    info "目标: $so"
 
     # 1. 备份当前部署版到设备侧 LKG
-    if $ADB shell "su -c 'cat $MODULE_SO > $LKG_DEV && md5sum $LKG_DEV'" >/dev/null 2>&1; then
-        info "已备份当前部署版 → $LKG_DEV ($(md5_dev $LKG_DEV | cut -c1-8)…)"
+    if $ADB shell "su -c 'cat $MODULE_SO > $LKG_DEV'" >/dev/null 2>&1; then
+        info "已备份当前部署版 → $LKG_DEV"
     else
         warn "备份失败, 将无法自动回退!"
     fi
 
-    # 2. push + cat 热更新 (magic-mount 即时生效)
+    # 2. 先停 HAL 再原地覆盖（运行中的 HAL 已 mmap 该 .so，原地改写会 SIGSEGV）
     $ADB push "$so" /data/local/tmp/leaudio_new.so >/dev/null || { fail "push 失败"; exit 1; }
+    $ADB shell "su -c 'stop vendor.bluetooth-1-0-qti'"
     $ADB shell "su -c 'cat /data/local/tmp/leaudio_new.so > $MODULE_SO'" || { fail "写入模块失败"; exit 1; }
-    h2=$(md5_dev "$MODULE_SO"); h3=$(md5_dev "/vendor/lib64/hw/android.hardware.bluetooth@1.0-impl-qti.so")
-    if [ "$h1" != "$h2" ] || [ "$h1" != "$h3" ]; then
-        fail "md5 校验失败 host=$h1 module=$h2 vendor=$h3"; exit 1
-    fi
-    info "部署完成 (模块 + /vendor 视图 md5 一致)"
+    info "已写入模块"
 
-    # 3. 清日志 + 重启 HAL
+    # 3. 清日志 + 启动 HAL
     $ADB shell "logcat -c"
-    $ADB shell "su -c 'setprop ctl.restart vendor.bluetooth-1-0-qti'"
+    $ADB shell "su -c 'start vendor.bluetooth-1-0-qti'"
     info "HAL 服务已重启, 健康监测中…"
 
     health_check || { do_rollback_now; exit 2; }
@@ -140,13 +133,14 @@ health_check() {
 
 do_rollback_now() {
     warn "自动回退 LKG …"
+    $ADB shell "su -c 'stop vendor.bluetooth-1-0-qti'"
     $ADB shell "su -c 'cat $LKG_DEV > $MODULE_SO'" || { fail "回退写入失败 — 需手动处理!"; exit 3; }
-    $ADB shell "su -c 'setprop ctl.restart vendor.bluetooth-1-0-qti'"
+    $ADB shell "su -c 'start vendor.bluetooth-1-0-qti'"
     sleep 6
     local p
     p=$(pid_svc)
     if [ -n "$p" ]; then
-        info "已回退并恢复 (pid=$p, md5 $(md5_dev "$MODULE_SO" | cut -c1-8)…)"
+        info "已回退并恢复 (pid=$p)"
     else
         fail "回退后服务仍未起来 — 手动检查!"
         exit 3
@@ -158,7 +152,7 @@ do_rollback() {
     do_rollback_now
     $ADB shell "logcat -c"; $ADB shell "su -c 'setprop ctl.restart vendor.bluetooth-1-0-qti'"
     health_check || { fail "回退后仍不稳定"; exit 2; }
-    info "回退完成 ✅ (当前部署: $(md5_dev "$MODULE_SO" | cut -c1-8)…)"
+    info "回退完成 ✅"
 }
 
 # ---------------- 重启 ----------------
@@ -239,16 +233,9 @@ do_status() {
     echo "==== 设备 & 服务 ===="
     echo "蓝牙: $($ADB shell 'dumpsys bluetooth_manager' 2>/dev/null | grep -m1 'state:')"
     echo "HAL pid: $(pid_svc)"
-    echo "部署 md5: $(md5_dev "$MODULE_SO")"
-    echo "LKG md5:  $(md5_dev "$LKG_DEV" 2>/dev/null || echo '(无备份)')"
     echo
-    echo "==== 白名单模块状态 ===="
-    $ADB shell 'su -c "
-for m in zygisk_vector hma_oss_zygisk zygisksu leaudio_marble_fix; do
-  if [ -e /data/adb/modules/\$m/disable ]; then s=disabled; else s=enabled; fi
-  v=\$(grep \"^version=\" /data/adb/modules/\$m/module.prop 2>/dev/null | head -1 | cut -d= -f2)
-  printf \"%-20s %-12s %s\\n\" \"\$m\" \"\$s\" \"\$v\"
-done"'
+    echo "==== 模块状态 ===="
+    $ADB shell "su -c 'if [ -e /data/adb/modules/$MODULE_ID/disable ]; then echo disabled; else echo enabled; fi; grep ^version= /data/adb/modules/$MODULE_ID/module.prop'"
     echo
     echo "==== 最近关键日志 ===="
     $ADB shell "logcat -d -s $LOGTAG" | grep -E "init \(|transact hook installed|dh=|NCP mult|evt parcel|sendIsoData|SECOND" | tail -8

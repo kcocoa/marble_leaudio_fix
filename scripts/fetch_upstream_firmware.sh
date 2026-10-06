@@ -32,7 +32,7 @@ while [ $# -gt 0 ]; do
 done
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DEST="${DEST:-$HERE/leaudio_marble_fix_v2/firmware}"
+DEST="${DEST:-$HERE/module/firmware}"
 
 SOURCES=(
   "https://gitlab.com/kernel-firmware/linux-firmware/-/raw/main/qca/hpbtfw21.tlv"

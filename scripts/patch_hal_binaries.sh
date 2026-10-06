@@ -2,19 +2,19 @@
 # patch_hal_binaries.sh — 对 dump 来的原厂 HAL 套用二进制补丁，产出部署用 .so。
 #
 # 输入（未打补丁的原厂文件，先由 scripts/dump_device_binaries.sh 拉取）:
-#   leaudio_marble_fix_v2/vendor/lib64/hw/libbluetooth_qti_real.so
-#   leaudio_marble_fix_v2/vendor/lib64/hw/audio.bluetooth.default.so
+#   module/vendor/lib64/hw/libbluetooth_qti_real.so
+#   module/vendor/lib64/hw/audio.bluetooth.default.so
 # 输出（就地覆盖，原文件另存 .orig.bak；或 --out-dir 另存）
 #
 # 用法:
 #   ./scripts/patch_hal_binaries.sh [--out-dir <目录>] [--qti-only | --audio-only]
 #
-# 机器码均经本机已部署件反汇编校准（llvm-objdump，2026-10-06）。
+# 机器码均经本机已部署件反汇编校准（llvm-objdump）。
 # 命中不足会中止——ROM/版本不同时不要盲改。
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-V="$HERE/leaudio_marble_fix_v2/vendor/lib64/hw"
+V="$HERE/module/vendor/lib64/hw"
 OUTDIR="$V"
 DO_QTI=1
 DO_AUDIO=1
@@ -56,7 +56,7 @@ if [ "$DO_AUDIO" = "1" ]; then
   if [ ! -f "$SRC" ]; then
     warn "缺少 $SRC（先跑 scripts/dump_device_binaries.sh）"
   else
-    echo "[*] audio.bluetooth.default.so 补丁（init_session_type 会话号 + UpdateSinkMetadata 静音）"
+    echo "[*] audio.bluetooth.default.so 补丁（UpdateSinkMetadata 空函数化，2 处）"
     OUT="$OUTDIR/audio.bluetooth.default.so"
     if [ "$OUTDIR" = "$V" ]; then
       [ "$OUT" = "$SRC" ] && cp -n "$SRC" "$SRC.orig.bak" 2>/dev/null || true
@@ -74,13 +74,11 @@ GUARDS = [
     (0x11544, "d503233f", "UpdateSinkMetadata 入口 paciasp 必须原样（BTI 落点，改了必 SIGILL）"),
 ]
 PATCHES = [
-    # init_session_type(): 把 BLE 耳机设备映射到硬件 Offload 会话号
-    (0x135cc, "52800108", "52800120", "SessionType 8 -> 9"),
-    (0x135e8, "528000a8", "528000e0", "SessionType 5 (SOFTWARE_DECODING) -> 7 (HWBW_DECODING)"),
-    (0x13620, "52800088", "528000c0", "SessionType 4 (SOFTWARE_ENCODING) -> 6 (HWBW_ENCODING)"),
+    # 注意：不要改 init_session_type（0x135cc/0x135e8/0x13620）的会话号——那是硬件
+    # offload 尝试期间的补丁，软件编码方案下会让音频 HAL 找错会话（docs/dead-ends.md 第 1 节）
     # UpdateSinkMetadata() 整体空函数化：sub sp,sp,#0x90 -> autiasp ; stp x29,x30 -> ret
     (0x11548, None,       "d50323bf", "sub sp,sp,#0x90 -> autiasp（与入口 paciasp 配对）"),
-    (0x1154c, None,       "d65f03c0", "stp x29,x30,[sp,#0x40] -> ret（函数体其余部分永达）"),
+    (0x1154c, None,       "d65f03c0", "stp x29,x30,[sp,#0x40] -> ret（函数体其余部分不可达）"),
 ]
 
 blob = bytearray(open(path, "rb").read())
@@ -122,10 +120,3 @@ PY
     ok "audio HAL -> $OUT"
   fi
 fi
-
-cat <<EOF
-
-[=] 完成。部署前在设备侧核对 md5:
-    libbluetooth_qti_real.so   期望 ce7fed1ce47a96f4b94505908bd31cc4（4 补丁版）
-    audio.bluetooth.default.so 期望 9769dbee5e5a16d8c2486527f7664dss（6 补丁版）
-EOF
