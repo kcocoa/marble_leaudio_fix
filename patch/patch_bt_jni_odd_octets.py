@@ -5,7 +5,7 @@
   LC3 编码输出写进 std::vector<int16_t>：
     Encode():  channel_samples = (out_offset + out_size) / 2      // 字节数 -> int16 个数，向下取整
     client.cc: SendIsoData(handle, vec.data(), vec.size() * 2)    // 发送长度也取自 vector
-  帧长是奇数（如 ROM 里 155 B 的预设，标准里也有 45 B、75 B）时，每帧少发 1 字节，
+  帧长是奇数（如 AOSP qpr2 的 155 B 预设，标准里也有 45 B、75 B）时，每帧少发 1 字节，
   耳机端 LC3 解码出错，听感是单耳"风声"。偶数帧长不受影响。
 
 补丁（只改 APEX com.android.bt@361099999 里的这一个库，偏移对应该版本）

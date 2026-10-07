@@ -479,7 +479,10 @@ LC3 编码输出放进 `std::vector<int16_t>`，元素数按 `(out_offset + out_
 155 B 的帧：77 个元素 → 发出去 154 B，每帧少 1 字节，耳机端 LC3 解码失败，走丢帧补偿，听感就是风声。
 （同时 `lc3_encode` 往只有 154 B 的缓冲区写 155 B，多写 1 字节。）
 
-**触发条件**：ROM 的 `audio_set_scenarios.json` 的 Media 列表里，厂商预设
+**触发条件**：设备上的 `audio_set_scenarios.json` 和 `audio_set_configurations.json` 与 AOSP `android16-qpr2-release` 分支
+**逐字节相同**（md5 `cb5e6b71…` 和 `6778ed8b…`），所以这些预设来自 AOSP 本身，不是 Xiaomi / LineageOS / 高通加的
+（`android16-release`、`android15-release`、`android14-release` 里没有 `155octs`，是 qpr2 才加入的；谁加的没查到）。
+Media 列表里，`VND_` 前缀的预设
 `VND_One-OneChan-SnkAse-Lc3_48_2_155octs_High_Reliability_2`（48 kHz、10 ms、155 B = 124 kbps，重传 24 次）
 排在标准 `One-OneChan 48_4`（120 B）之前，单耳先匹配到它。双耳先匹配 `Two-OneChan 48_4`（120 B，偶数）。
 标准预设里还有 45 B（`24_1`）和 75 B（`48_1`）也是奇数，换耳机后可能触发同样的问题。
@@ -513,10 +516,11 @@ Abort message: 'system/bta/le_audio/state_machine.cc:1628 AddCisToStreamConfigur
 ```
 
 **根因**：新成员加入正在播放的组时，`AttachToStream` 会作废缓存的配置并重新选一次（源码注释："Invalidate configuration
-to make sure it is chosen properly when new member connects"）。单耳时 Media 选中的是 ROM 的厂商预设
+to make sure it is chosen properly when new member connects"）。单耳时 Media 选中的是 AOSP qpr2 自带的预设
 `VND_One-OneChan…155octs`（155 B），两只耳机重新匹配到 `Two-OneChan 48_4`（120 B）。
 新 CIS 在 `ProcessHciNotifSetupIsoDataPath` 里被加进流配置时，`log::assert_that` 发现 155 ≠ 120，直接 abort。
-标准 AOSP 预设单双耳都是 120 B，不会遇到；这是 ROM 的 155 B 厂商预设只配给单耳造成的。
+标准预设单双耳都是 120 B，不会遇到；这是 AOSP qpr2 里 155 B 的 `VND_` 预设单耳、双耳不对称造成的
+（单耳有 `VND_One-OneChan…155octs`，双耳的 `VND_Two-OneChan…155octs` 排在 `Two-OneChan 48_4` 之后，永远轮不到）。
 
 **试过但不行：让双耳也用 155 B**（把 `VND_Two-OneChan…155octs` 挪到 Media 最前）。abort 不再出现，但：
 
@@ -527,15 +531,36 @@ CREATE_CIS [(11,9)]  -> CIS_ESTABLISHED status 0x1e  （第二只后来加入：
 ```
 
 控制器拒绝给已有一个 CIS 的 CIG 追加第二个 CIS，栈停流后不再重试，表现为"还在播放但没有声音"。
-原因推测是 155 B、重传 24 次占用的空口时间太多，已有 CIS 的时间表旁边排不进第二个；没有控制器侧的日志证实。
-（同一次测试里，两个 CIS 一起建，RTN=3 的第一次尝试 CIS 6 也报过 0x1e，栈改成 RTN=24 重试后成功，所以机制并不完全清楚。）
 
-**最终做法**：`patch/patch_vendor_configs.py` 把 Media 列表里单耳用的 `VND_One-OneChan…155octs` 删掉，
-单耳回到标准的 `One-OneChan 48_4`（120 B、RTN=3），单双耳一致。
+**原因没有查清**。从 `LE CIS Established` 事件和 shim 日志能确定的事实：
 
-**验证**：单耳先建 CIS 6（120 B），24 秒后第二只加入，CIS 7 建立成功（status 0x00），两条 CIS 各发 120 B，间隔 10 ms，
-蓝牙进程 PID 不变，听感正常。
+- 不管栈请求的 RTN 是 3 还是 24，控制器给的都是 NSE=4、BN=1、FT=1、ISO 间隔 10 ms
+  （shim 把 Max_Transport_Latency 截到 10 ms，控制器能排的子事件只有 4 个）。所以**不是重传次数的问题**，
+  早先写的"重传 24 次占用空口太多"是错的。
+- 155 B 的 CIG 占 8330 µs（ISO 间隔的 83%），120 B 的占 7210 µs（72%）。两个 CIS 在窗口里先后排布，
+  排在后面那个的 `CIS_Sync_Delay` 约为一半。
+- 失败那次，被追加的是排在后面的 CIS（先连的 A7:C8 在前，后加入的 E3:01 在后）。
+  120 B 时同样的追加成功。另有一次 155 B 追加成功（配置里把 RTN 降到 2，实际下发值没保留下来），
+  那次被追加的 CIS 排在前面（其 `CIS_Sync_Delay` 等于 CIG 的）。
+- 两个 CIS 一起建时，RTN=3 的第一次尝试 CIS 6 也报过 0x1e，栈换 RTN=24 重试就成功了，
+  说明时机（刚建立的 ACL 连接参数还在调整，连接间隔 20 → 30/40 ms）也可能有影响。
 
-代价：单耳从 124 kbps 回到标准的 96 kbps。第 14 节的奇数帧长补丁仍然保留：这份 ROM 的默认预设不再用到 155 B，
-但标准预设里还有 45 B、75 B，换耳机遇到时仍然需要它。
+每种情况只有 1 到 2 个样本，没能把"被追加的 CIS 顺序""CIG 占用时间""ACL 连接状态"三个因素分开。
+也不能把责任推给控制器固件：shim 的 10 ms 截断是我们加的，它决定了 NSE 和窗口，没做过关掉它的对照。
 
+**155 B 就是这两只耳机支持的最高**：两只耳机的 Sink PAC 都是
+`Supported Octets Per Codec Frame: Minimum 0, Maximum 155`，`Max Codec Frames Per SDU: 1`，采样率最高 48 kHz，
+帧长 7.5 / 10 ms。所以 48 kHz、10 ms、155 B（124 kbps）是上限，手机按规范不能配得更高。
+（7.5 ms 帧配 155 B 是 165 kbps，在 PAC 范围内，但不是标准预设，而且 ISO 间隔缩短后两个 CIS 更排不下，没有试。）
+
+**最终做法（当前默认）**：`patch/patch_vendor_configs.py` 把 `VND_Two-OneChan…155octs` 挪到 Media 最前，
+单耳（原有的 `VND_One-OneChan…155octs`）和双耳都选 155 B，前后一致，abort 不再出现。
+两只一起建流、单耳播放都用 155 B，奇数帧长补丁（第 14 节）在这里是必需的。
+
+**已知代价**：单耳播放时放入第二只耳机，控制器有时拒绝追加第二个 CIS（上面的 0x1e），
+表现为"还在播放但没有声音"，暂停再播放即可恢复（两个 CIS 一起建不受影响）。
+换成默认的 155 B 之后再试，单耳切双耳是正常的；之前那次失败可能是时序上的竞态（没有证实）。
+
+**更稳的备选（已验证）**：删掉 Media 里的 `VND_One-OneChan…155octs`，单双耳都回到标准的 120 B、RTN=3。
+单耳先建 CIS 6（120 B），24 秒后第二只加入，CIS 7 建立成功，两条 CIS 各发 120 B，间隔 10 ms，蓝牙进程 PID 不变。
+代价是单耳从 124 kbps 回到 96 kbps。提交 `b06a6de` 是这个版本。

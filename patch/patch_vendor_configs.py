@@ -13,12 +13,15 @@
      BLE 输入必须声明，否则 LE Audio 设备在 AudioPolicy 中不可用（docs/dead-ends.md 第 6 节）
   3. 音频策略: 去掉 primary 模块 "A2DP In" 端口的 encodedFormats="AUDIO_FORMAT_LC3"
      （原厂为高通硬件 offload 所写；与已验证可用的配置保持一致）
-  4. LE Audio 预设: 删掉 Media 列表里单耳用的 VND_One-OneChan…155octs。
-     ROM 只给单耳配了 155 B 的厂商预设，双耳却匹配到 120 B 的标准预设。单耳播放时放入第二只耳机，
-     栈会重新选配置，新 CIS 的 120 B 和已有的 155 B 不一致，AddCisToStreamConfiguration 断言失败，
-     蓝牙进程 abort。而且 155 B、RTN=24 的 CIG 在已有一个 CIS 时追加第二个 CIS，控制器返回 0x1e 拒绝，
-     所以不能反过来让双耳也用 155 B。删掉后单耳回到标准的 120 B、RTN=3，单双耳一致，可以动态追加
+  4. LE Audio 预设: Media 列表里把 VND_Two-OneChan…155octs 挪到最前。
+     两只耳机的 Sink PAC 声明每帧最多 155 B（48 kHz、10 ms 即 124 kbps），这是它们支持的最高码率。
+     AOSP 的预设里单耳有 155 B 的 VND_One-OneChan，双耳的 VND_Two-OneChan 却排在 120 B 的标准预设之后，
+     轮不到。单耳播放时放入第二只耳机，栈重新选配置，120 B 和已有的 155 B 不一致，
+     AddCisToStreamConfiguration 断言失败，蓝牙进程 abort。让双耳也选 155 B，前后一致
      （docs/root-causes.md 第 15 节）。
+     已知代价：单耳播放时放入第二只耳机，控制器有时拒绝追加第二个 CIS（0x1e），表现为"在播放但没声音"，
+     暂停再播放即可（两个 CIS 一起建不受影响）。
+     想要稳一点就删掉 Media 里的 VND_One-OneChan…155octs，单双耳都回到 120 B。
 
 就地修改，可重复执行（已改过的文件跳过）；结构与预期不符时中止，不做猜测性修改。
 
@@ -146,7 +149,7 @@ def patch_policy(path):
     print(f"[✓] 音频策略: {path}")
 
 
-SCEN_ONE = "VND_One-OneChan-SnkAse-Lc3_48_2_155octs_High_Reliability_2"
+SCEN_TWO = "VND_Two-OneChan-SnkAse-Lc3_48_2_155octs_High_Reliability_2"
 
 
 def patch_scenarios(path):
@@ -156,17 +159,19 @@ def patch_scenarios(path):
         die(f"{path}: 找不到 Media 场景")
     end = s.index("]", m.end())
     body = s[m.end():end]
-    n = body.count(f'"{SCEN_ONE}"')
-    if n == 0:
-        print("[=] Media 里已没有单耳 155 B 预设，跳过")
+    items = [x.strip().rstrip(",").strip('"') for x in body.strip().splitlines()]
+    if items.count(SCEN_TWO) != 1:
+        die(f"{path}: Media 列表里 {SCEN_TWO} 不是恰好一条")
+    if items[0] == SCEN_TWO:
+        print("[=] Media 预设顺序已改，跳过")
         return
-    if n != 1:
-        die(f"{path}: Media 列表里 {SCEN_ONE} 出现 {n} 次")
-    body = re.sub(r'^[ \t]*"%s",?\n' % re.escape(SCEN_ONE), "", body, flags=re.M)
-    s = s[:m.end()] + body + s[end:]
+    line = re.search(r'^([ \t]*)"%s",\n' % re.escape(SCEN_TWO), body, re.M)
+    indent = line.group(1)
+    body = body.replace(line.group(0), "", 1)
+    s = s[:m.end()] + f'{indent}"{SCEN_TWO}",\n' + body + s[end:]
     json.loads(s)
     open(path, "w", encoding="utf-8").write(s)
-    print(f"[✓] LE Audio 预设: 从 Media 删掉 {SCEN_ONE}: {path}")
+    print(f"[✓] LE Audio 预设: {SCEN_TWO} 挪到 Media 最前: {path}")
 
 
 def main():
