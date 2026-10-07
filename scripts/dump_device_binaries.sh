@@ -19,7 +19,7 @@
 #   vendor/etc/vintf/manifest_ukee.xml                          活动 SKU 的 VINTF manifest
 #   vendor/etc/audio/sku_ukee/audio_policy_configuration.xml    活动 SKU 的音频策略
 #   apex/com.android.bt/lib64/libbluetooth_jni.so               蓝牙栈（APEX 361099999）
-#   apex/com.android.bt/etc/bluetooth/le_audio/audio_set_scenarios.json   LE Audio 预设场景（原样留作调试入口）
+#   apex/com.android.bt/etc/bluetooth/le_audio/audio_set_scenarios.json   LE Audio 预设场景（原厂件；patch_vendor_configs.py 会删一条）
 # --with-build-deps: 追加 /system/lib64/{libhidlbase,libutils,libc++}.so 到 build/lib/（编译 shim 用）
 # --all: 追加原厂固件/NV、HAL 服务二进制到 dump/（仅取证用）
 set -euo pipefail

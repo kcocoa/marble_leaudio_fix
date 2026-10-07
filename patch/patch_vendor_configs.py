@@ -4,6 +4,7 @@
 输入（先由 scripts/dump_device_binaries.sh 导出原厂文件）:
   module/vendor/etc/vintf/manifest_ukee.xml
   module/vendor/etc/audio/sku_ukee/audio_policy_configuration.xml
+  module/apex/com.android.bt/etc/bluetooth/le_audio/audio_set_scenarios.json   （有才改）
 
 改动:
   1. manifest: IBluetoothHci 声明 @1.0 -> @1.1（<version>+<interface> 写法；
@@ -12,12 +13,19 @@
      BLE 输入必须声明，否则 LE Audio 设备在 AudioPolicy 中不可用（docs/dead-ends.md 第 6 节）
   3. 音频策略: 去掉 primary 模块 "A2DP In" 端口的 encodedFormats="AUDIO_FORMAT_LC3"
      （原厂为高通硬件 offload 所写；与已验证可用的配置保持一致）
+  4. LE Audio 预设: 删掉 Media 列表里单耳用的 VND_One-OneChan…155octs。
+     ROM 只给单耳配了 155 B 的厂商预设，双耳却匹配到 120 B 的标准预设。单耳播放时放入第二只耳机，
+     栈会重新选配置，新 CIS 的 120 B 和已有的 155 B 不一致，AddCisToStreamConfiguration 断言失败，
+     蓝牙进程 abort。而且 155 B、RTN=24 的 CIG 在已有一个 CIS 时追加第二个 CIS，控制器返回 0x1e 拒绝，
+     所以不能反过来让双耳也用 155 B。删掉后单耳回到标准的 120 B、RTN=3，单双耳一致，可以动态追加
+     （docs/root-causes.md 第 15 节）。
 
 就地修改，可重复执行（已改过的文件跳过）；结构与预期不符时中止，不做猜测性修改。
 
 用法: python3 patch/patch_vendor_configs.py [--module-dir <路径>]
 """
 import argparse
+import json
 import os
 import re
 import sys
@@ -138,6 +146,29 @@ def patch_policy(path):
     print(f"[✓] 音频策略: {path}")
 
 
+SCEN_ONE = "VND_One-OneChan-SnkAse-Lc3_48_2_155octs_High_Reliability_2"
+
+
+def patch_scenarios(path):
+    s = open(path, encoding="utf-8").read()
+    m = re.search(r'"name":\s*"Media",\s*"configurations":\s*\[\n', s)
+    if not m:
+        die(f"{path}: 找不到 Media 场景")
+    end = s.index("]", m.end())
+    body = s[m.end():end]
+    n = body.count(f'"{SCEN_ONE}"')
+    if n == 0:
+        print("[=] Media 里已没有单耳 155 B 预设，跳过")
+        return
+    if n != 1:
+        die(f"{path}: Media 列表里 {SCEN_ONE} 出现 {n} 次")
+    body = re.sub(r'^[ \t]*"%s",?\n' % re.escape(SCEN_ONE), "", body, flags=re.M)
+    s = s[:m.end()] + body + s[end:]
+    json.loads(s)
+    open(path, "w", encoding="utf-8").write(s)
+    print(f"[✓] LE Audio 预设: 从 Media 删掉 {SCEN_ONE}: {path}")
+
+
 def main():
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     ap = argparse.ArgumentParser()
@@ -149,6 +180,9 @@ def main():
             die(f"缺少 {os.path.join(etc, p)}（先跑 scripts/dump_device_binaries.sh）")
     patch_manifest(os.path.join(etc, "vintf/manifest_ukee.xml"))
     patch_policy(os.path.join(etc, "audio/sku_ukee/audio_policy_configuration.xml"))
+    scen = os.path.join(a.module_dir, "apex/com.android.bt/etc/bluetooth/le_audio/audio_set_scenarios.json")
+    if os.path.isfile(scen):
+        patch_scenarios(scen)
 
 
 if __name__ == "__main__":

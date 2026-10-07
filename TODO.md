@@ -9,21 +9,11 @@
    符合 Android 行为）。耳机麦克风只在通话场景（`VOICE_COMMUNICATION`）启用，
    需要一次真实通话才能验证。
 
-## 待查：单耳播放中放入第二只耳机，蓝牙栈 abort
+## 可选：更高码率
 
-蓝牙进程 abort，断言在 `state_machine.cc` 的 `AddCisToStreamConfiguration`：
-`octets per frame mismatch: 155!=120`（`/data/tombstones` 里 6 份 tombstone 的消息完全相同，
-最早的在 10-07 00:58，早于补丁，所以不是补丁引起的）。
-单耳在播放（走 155 B 预设）时把第二只耳机拿出充电盒，第二只被配成 120 B，和已有的 155 B 不一致，栈直接 abort，重启后恢复。
-**原因还只是推测，没有验证**（没抓到崩溃前的日志）。可能的缓解：让单耳也走 120 B 预设（删掉那条 `VND_One-OneChan…155octs`），
-这样前后配置一致；但会放弃单耳的 124 kbps。
-
-## 可选：双耳 124 kbps
-
-2. 已实测：把 `audio_set_scenarios.json` Media 列表里的 `VND_Two-OneChan-SnkAse-Lc3_48_2_155octs_High_Reliability_2`
-   挪到最前，双耳每耳 155 B（124 kbps）可用。目前没有启用（默认仍是标准 120 B）。
-   要启用就改模块里的 `apex/com.android.bt/etc/bluetooth/le_audio/audio_set_scenarios.json`（现在是原厂原样）。
-   还没验证：长时间播放的稳定性、信号差时（QoS 是重传 24 次、延迟 100 ms）是否更容易断续。
+2. 155 B（124 kbps，重传 24 次）在两只耳机**一起建流**时可用，但不能给已有一个 CIS 的 CIG 动态追加第二个 CIS
+   （控制器返回 0x1e，见 `docs/root-causes.md` 第 15 节），所以默认没有启用。
+   想试的话可以改 `VND_QoS_Config_R24_L100` 的重传次数（比如 5），看控制器能不能接受动态追加；还没试。
 
 3. 广播（BIS）路径也用同一个 `Encode`，奇数帧长时发送长度会比真实长度多 1 字节（原来是少 1 字节）。
    没有用到广播，没测。

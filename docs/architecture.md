@@ -132,8 +132,9 @@ AudioFlinger
 - 没有 hybrid-mount 时脚本只打日志后退出，不影响其他部分。
 - 调试：改模块里的文件后 `sh post-mount.sh`（同一路径的规则会被替换），再 `cmd bluetooth_manager disable/enable`。
 
-`audio_set_scenarios.json` 目前是**原厂原样**，只是留作调试入口：以后要换预设（例如把 `VND_Two-OneChan…155octs`
-挪到 Media 列表最前，双耳就用 124 kbps，实测可用），直接改模块里这个文件。
+`audio_set_scenarios.json` 是调试入口：以后要换预设，直接改模块里这个文件。目前和原厂只差一行：
+`patch_vendor_configs.py` 删掉了 Media 里单耳用的 `VND_One-OneChan…155octs`，避免单耳切双耳时蓝牙崩溃（root-causes.md 第 15 节）。
+注意不能反过来让双耳也用 155 B：155 B、RTN=24 的 CIG 不能动态追加第二个 CIS（控制器返回 0x1e）。
 
 `libbluetooth_jni.so` 的补丁见 `patch/patch_bt_jni_odd_octets.py`，根因和证据见 root-causes.md 第 14 节。
 

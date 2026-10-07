@@ -25,7 +25,7 @@ module/
 ├── post-mount.sh                     开机时把 apex/ 下的文件用 hybrid_mount 的 vfs 规则重定向到 /apex
 ├── apex/com.android.bt/              （均不入库，从设备导出）
 │   ├── lib64/libbluetooth_jni.so       蓝牙栈，6 处补丁（奇数帧长）
-│   └── etc/bluetooth/le_audio/audio_set_scenarios.json   原厂原样，调试入口：要改预设就改这个文件
+│   └── etc/bluetooth/le_audio/audio_set_scenarios.json   调试入口，要改预设就改这个文件；与原厂只差一行（删掉单耳 155 B 预设）
 └── vendor/
     ├── bt_firmware/image/hpbtfw21.tlv  上游固件 00680（脚本下载，不入库）
     ├── lib64/hw/                     （均不入库）

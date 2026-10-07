@@ -9,7 +9,8 @@
 # 目前有两个：
 #   apex/com.android.bt/lib64/libbluetooth_jni.so   补丁版（修奇数帧长丢 1 字节）
 #   apex/com.android.bt/etc/bluetooth/le_audio/audio_set_scenarios.json
-#                                                    原厂原样，留作调试入口：以后改预设直接改这个文件
+#                                                    调试入口，改预设直接改这个文件；
+#                                                    与原厂只差一行（删掉单耳 155 B 预设，见 docs/root-causes.md 第 15 节）
 #
 # 调试：改完模块里的文件后，`sh post-mount.sh` 重新加规则（同一路径会被替换），再重启蓝牙栈。
 

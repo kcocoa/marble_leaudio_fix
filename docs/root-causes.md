@@ -494,9 +494,48 @@ LC3 编码输出放进 `std::vector<int16_t>`，元素数按 `(out_offset + out_
    （前者是单 CIS 里一个 CIS 装两个声道，长度 `2*byte_count`；`byte_count` 即 `octets_per_codec_frame`，在栈上 `[sp,#108]`）。
 
 **验证**：补丁后单耳 3979 个 SDU 全是 155 B（控制器 ISO 单包上限正好 155 B，每个 SDU 拆成 151+4 两片），间隔 9.999 ms，
-杂音消失；双耳 120 B 路径（CIS 5 和 6 各 1741 个 SDU）不变；双耳换成 `VND_Two-OneChan…155octs`（每耳 124 kbps）也正常。
+杂音消失；双耳 120 B 路径（CIS 5 和 6 各 1741 个 SDU）不变；两只耳机同时建流时换成 `VND_Two-OneChan…155octs`（每耳 124 kbps）也正常。
+但 155 B 方案有别的代价（单耳切双耳会崩溃或建不起第二个 CIS），最终默认配置没有采用，见第 15 节。
 过程中还确认：不碰 APEX、不用 bind mount，用 hybrid_mount 的 vfs 规则重定向 `/apex` 下的文件，蓝牙进程重启后仍然有效（见 architecture.md 2.7）。
 
 **没有采用的方案**：只改 JSON 删掉两条 155 B 预设（能回避，但根因还在，换耳机遇到 45 B / 75 B 会再触发）；
 `add w9,w8,#1`（元素数变成 size+1，偶数帧长在广播路径上会发出两倍长度）。
+
+---
+
+## 15. 单耳切双耳：蓝牙栈 abort（155!=120），改成 155 B 后又是控制器拒绝第二个 CIS（0x1e）
+
+**现象**：单耳播放时把第二只耳机拿出充电盒，蓝牙进程重启一次。`/data/tombstones` 里有 6 份内容完全相同的 tombstone，
+最早的在补丁之前：
+
+```
+Abort message: 'system/bta/le_audio/state_machine.cc:1628 AddCisToStreamConfiguration: octets per frame mismatch: 155!=120'
+```
+
+**根因**：新成员加入正在播放的组时，`AttachToStream` 会作废缓存的配置并重新选一次（源码注释："Invalidate configuration
+to make sure it is chosen properly when new member connects"）。单耳时 Media 选中的是 ROM 的厂商预设
+`VND_One-OneChan…155octs`（155 B），两只耳机重新匹配到 `Two-OneChan 48_4`（120 B）。
+新 CIS 在 `ProcessHciNotifSetupIsoDataPath` 里被加进流配置时，`log::assert_that` 发现 155 ≠ 120，直接 abort。
+标准 AOSP 预设单双耳都是 120 B，不会遇到；这是 ROM 的 155 B 厂商预设只配给单耳造成的。
+
+**试过但不行：让双耳也用 155 B**（把 `VND_Two-OneChan…155octs` 挪到 Media 最前）。abort 不再出现，但：
+
+```
+SET_CIG   cis0/cis1 sdu=155 rtn=24 maxlat=100ms     （两个 CIS 一起建：成功）
+CREATE_CIS [(10,2)]  -> established                  （第一只）
+CREATE_CIS [(11,9)]  -> CIS_ESTABLISHED status 0x1e  （第二只后来加入：INVALID_LMP_OR_LL_PARAMETERS）
+```
+
+控制器拒绝给已有一个 CIS 的 CIG 追加第二个 CIS，栈停流后不再重试，表现为"还在播放但没有声音"。
+原因推测是 155 B、重传 24 次占用的空口时间太多，已有 CIS 的时间表旁边排不进第二个；没有控制器侧的日志证实。
+（同一次测试里，两个 CIS 一起建，RTN=3 的第一次尝试 CIS 6 也报过 0x1e，栈改成 RTN=24 重试后成功，所以机制并不完全清楚。）
+
+**最终做法**：`patch/patch_vendor_configs.py` 把 Media 列表里单耳用的 `VND_One-OneChan…155octs` 删掉，
+单耳回到标准的 `One-OneChan 48_4`（120 B、RTN=3），单双耳一致。
+
+**验证**：单耳先建 CIS 6（120 B），24 秒后第二只加入，CIS 7 建立成功（status 0x00），两条 CIS 各发 120 B，间隔 10 ms，
+蓝牙进程 PID 不变，听感正常。
+
+代价：单耳从 124 kbps 回到标准的 96 kbps。第 14 节的奇数帧长补丁仍然保留：这份 ROM 的默认预设不再用到 155 B，
+但标准预设里还有 45 B、75 B，换耳机遇到时仍然需要它。
 
