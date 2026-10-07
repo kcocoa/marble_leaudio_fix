@@ -175,6 +175,29 @@ adb -s $SER logcat -d | grep "dropping ISO"
 
 ---
 
+### 听歌时监测 artifact（`scripts/leaudio_watch.py`）
+
+怀疑耳机里偶尔有杂音时，一边听歌一边跑：
+
+```bash
+SERIAL=<adb 序列号> ./scripts/leaudio_watch.py          # 每 10 秒一行；Ctrl-C 结束并打印总结
+```
+
+听到杂音就**按回车打标记**，脚本回看那一刻前 10 秒，并把当时的 btsnoop 存到 `monitor_runs/watch_*/mark_N/`。
+它从滚动的 btsnoop 里增量检查：ISO 序号是否连续、发送间隔（>15 ms 记为异常，>12.5 ms 记为抖动）、
+把发出去的 SDU 用 liblc3 解码（坏帧 = 触发丢帧补偿）、断连 / CIS 建立失败 / 硬件错误、
+蓝牙进程和 HAL 进程有没有重启、logcat 里的关键报错。
+
+怎么读结论：
+
+- 标记时主机侧有异常：问题在手机这边（缺帧、发送间隔变大、坏帧、断连、进程重启）。
+- 标记时主机侧全部干净：更可能是空口丢包或耳机侧。**脚本看不到空口**：控制器的完成数（NCP）不区分"发出"和"超时丢弃"，
+  要测空口得让 shim 去读控制器的 `LE Read ISO Link Quality`（0x2075，有 TX_UnACKed / TX_Flushed / Retransmitted 计数），目前没做。
+- 发送间隔偶尔超过 15 ms 不一定有声音问题：耳机有呈现延迟，能吸收一部分主机侧抖动。要靠标记对照耳朵。
+
+btsnoop 是滚动日志（每 65536 条记录一个文件，保留两个，约 10 分钟），脚本每个周期都拉一次并处理新增部分，
+不用担心滚动；但时间间隔别设得太大（建议不超过 60 秒）。
+
 ## 7. 事故复盘
 
 ### 事故一：VINTF fragment → bootloop
