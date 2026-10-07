@@ -463,7 +463,40 @@ hold(send->NCP) avg=19880us max=24936us n=750, send call avg=128us
 - **实测听感**：完全消除卡顿、爆音和毛刺，双耳音质完美。
 
 **持久化落地**：
-- 将固件存入模块目录 `$MODDIR/firmware/hpbtfw21.tlv`。
 - 放在模块的 `vendor/bt_firmware/image/hpbtfw21.tlv`，由元模块挂载到 `/vendor/bt_firmware/image/hpbtfw21.tlv`（系统分区零写入；
   早期版本用 `post-fs-data.sh` 的 `mount -o bind`，见 architecture.md 2.6）。
 - 开机时在 Bluetooth HAL 启动前自动挂载生效，重启完全自愈。
+
+---
+
+## 14. 单耳「风声 / 磁带衰减」：LC3 帧长为奇数时每帧少发 1 字节
+
+**现象**：只连一只耳机时，音乐里有风声般的杂音、音高飘忽。双耳同时连没有。
+
+**根因**（AOSP `system/bta/le_audio/codec_interface.cc` 和 `client.cc`，在 `libbluetooth_jni.so` 里）：
+LC3 编码输出放进 `std::vector<int16_t>`，元素数按 `(out_offset + out_size) / 2` 算（字节数除以 2，向下取整），
+发送长度按 `vector.size() * 2` 算。这套缓冲区原本装 16 位 PCM，字节数必为偶数；编码输出的帧长可以是奇数。
+155 B 的帧：77 个元素 → 发出去 154 B，每帧少 1 字节，耳机端 LC3 解码失败，走丢帧补偿，听感就是风声。
+（同时 `lc3_encode` 往只有 154 B 的缓冲区写 155 B，多写 1 字节。）
+
+**触发条件**：ROM 的 `audio_set_scenarios.json` 的 Media 列表里，厂商预设
+`VND_One-OneChan-SnkAse-Lc3_48_2_155octs_High_Reliability_2`（48 kHz、10 ms、155 B = 124 kbps，重传 24 次）
+排在标准 `One-OneChan 48_4`（120 B）之前，单耳先匹配到它。双耳先匹配 `Two-OneChan 48_4`（120 B，偶数）。
+标准预设里还有 45 B（`24_1`）和 75 B（`48_1`）也是奇数，换耳机后可能触发同样的问题。
+
+**证据**：btsnoop 里 4003 个 SDU 全是 154 B（配置 155 B），ISO 包间隔 10.000 ms、序号连续、无丢包；
+用 liblc3 按 155 B 解码坏帧约 2%，按 154 B 约 45%。控制器、固件、耳机、shim 都没问题。
+
+**修复**（`patch/patch_bt_jni_odd_octets.py`，仅 APEX `361099999`，6 处）：
+1. `Encode`：samples = `size - size/2`（向上取整，一条指令），偶数帧长的行为不变。
+2. 三个发送点（单 CIS、双 CIS 的左和右）：编译器每处调用两次 `GetDecodedSamples()`，第二次多余，去掉后用腾出的位置算真实长度
+   `L = (vector 字节数/2 == byte_count) ? vector 字节数 : byte_count`
+   （前者是单 CIS 里一个 CIS 装两个声道，长度 `2*byte_count`；`byte_count` 即 `octets_per_codec_frame`，在栈上 `[sp,#108]`）。
+
+**验证**：补丁后单耳 3979 个 SDU 全是 155 B（控制器 ISO 单包上限正好 155 B，每个 SDU 拆成 151+4 两片），间隔 9.999 ms，
+杂音消失；双耳 120 B 路径（CIS 5 和 6 各 1741 个 SDU）不变；双耳换成 `VND_Two-OneChan…155octs`（每耳 124 kbps）也正常。
+过程中还确认：不碰 APEX、不用 bind mount，用 hybrid_mount 的 vfs 规则重定向 `/apex` 下的文件，蓝牙进程重启后仍然有效（见 architecture.md 2.7）。
+
+**没有采用的方案**：只改 JSON 删掉两条 155 B 预设（能回避，但根因还在，换耳机遇到 45 B / 75 B 会再触发）；
+`add w9,w8,#1`（元素数变成 size+1，偶数帧长在广播路径上会发出两倍长度）。
+

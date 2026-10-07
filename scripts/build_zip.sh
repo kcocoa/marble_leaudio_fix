@@ -13,6 +13,9 @@ FILES=(
   module.prop
   system.prop
   customize.sh
+  post-mount.sh
+  apex/com.android.bt/lib64/libbluetooth_jni.so
+  apex/com.android.bt/etc/bluetooth/le_audio/audio_set_scenarios.json
   vendor/bt_firmware/image/hpbtfw21.tlv
   vendor/lib64/hw/android.hardware.bluetooth@1.0-impl-qti.so
   vendor/lib64/hw/libbluetooth_qti_real.so

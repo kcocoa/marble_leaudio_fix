@@ -115,6 +115,28 @@ AudioFlinger
 - 控制器每次开蓝牙时从该路径读固件，验签在芯片 ROM 里，所以必须是高通官方签名的上游版本。
 - 零写入系统分区，模块禁用或移除后完全还原。
 
+### 2.7 `/apex` 重定向（`apex/`，由 `post-mount.sh` 加 vfs 规则）
+
+蓝牙栈（`libbluetooth_jni.so` 和 LE Audio 预设 JSON）在 LineageOS 签名的 APEX `com.android.bt@361099999` 里，
+**不能重打包**（没有签名密钥），元模块的 `system/apex/...` 也挂不到 `/apex`（只会建 `/system/apex/...` 的虚拟路径）。
+
+做法：模块的 `apex/<路径>` 对应 `/apex/<路径>`，`post-mount.sh` 对每个文件执行
+`hybrid-mount vfs rule add /apex/<路径> $MODDIR/apex/<路径>`。要点：
+
+- hybrid_mount 的 vfs 是**内核里的路径重定向**，对所有进程生效，不依赖挂载命名空间，蓝牙进程重启不丢
+  （bind mount 做不到：`com.android.bluetooth` 每次重启换 PID 和挂载命名空间）。
+- 规则**只在运行时有效**，每次开机重新加；模块禁用或删除后下次开机自然消失。
+- 规则按 inode 生效，`/apex/com.android.bt` 和 `/apex/com.android.bt@361099999` 两个路径都会看到替换后的内容。
+  所以要导出原厂件，不能读 `/apex`，`dump_device_binaries.sh` 改从解压 APEX 镜像里取。
+- APEX 版本不是 `361099999` 时脚本直接跳过（补丁偏移按该版本校准，拿旧文件替换新版本会崩）。
+- 没有 hybrid-mount 时脚本只打日志后退出，不影响其他部分。
+- 调试：改模块里的文件后 `sh post-mount.sh`（同一路径的规则会被替换），再 `cmd bluetooth_manager disable/enable`。
+
+`audio_set_scenarios.json` 目前是**原厂原样**，只是留作调试入口：以后要换预设（例如把 `VND_Two-OneChan…155octs`
+挪到 Media 列表最前，双耳就用 124 kbps，实测可用），直接改模块里这个文件。
+
+`libbluetooth_jni.so` 的补丁见 `patch/patch_bt_jni_odd_octets.py`，根因和证据见 root-causes.md 第 14 节。
+
 ## 3. 构建配方
 
 `scripts/build_shim.sh` 完成以下工作，前置文件放在仓库内 `build/`（不入库）：

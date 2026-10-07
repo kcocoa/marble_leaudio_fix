@@ -15,9 +15,10 @@ patch/bluetooth_hci_shim/android.hardware.bluetooth@*
 # - monitor_runs/   logcat 衍生数据（含全量设备日志）
 # - dump/           dump_device_binaries.sh --all 的取证产物
 # - build/          shim 构建前置（设备 so + 头文件）与产物
-# - 设备提取的 vendor XML（audio_policy / vintf manifest）
+# - 设备提取的 vendor XML（audio_policy / vintf manifest）和 apex 文件（蓝牙栈库、LE Audio 预设 JSON）
 monitor_runs/
 dump/
 build/
+module/apex/
 module/vendor/etc/audio/
 module/vendor/etc/vintf/

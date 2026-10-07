@@ -19,7 +19,7 @@
 |---|---|
 | 设备 | Redmi Note 12 Turbo（`marble`，SM7475，`ro.boot.product.vendor.sku=ukee`） |
 | 系统 | LineageOS 23.2 / Android 16 |
-| Root | KernelSU，并已安装一个挂载用的**元模块**（metamodule），且**不能用 overlayfs 模式**，见下 |
+| Root | KernelSU，并已安装挂载用的**元模块**：**依赖 hybrid_mount，且不能用 overlayfs 模式**，见下 |
 | 耳机 | LE Audio 单播（unicast）耳机 |
 
 本模块要用 overlay 替换 `/vendor` 下的文件，而 KernelSU 本身不负责挂载模块文件，这一步由元模块完成。
@@ -28,6 +28,12 @@
 蓝牙固件（`/vendor/bt_firmware`，独立的 vfat 分区）也由元模块挂载。内核 overlayfs 不接受 vfat 做下层，
 所以元模块用 overlayfs 时挂载会失败（hybrid_mount 还会回滚所有模块）。请改用 vfs 或 magic mount，
 例如 hybrid_mount：`default_mode = "vfs"`。
+
+**依赖 hybrid_mount（用 vfs 模式）**：蓝牙栈在 LineageOS 签名的 APEX 里（`/apex/com.android.bt`），
+不能重打包，普通元模块也挂不上去。hybrid_mount 的 vfs 是内核里的路径重定向，模块在开机时
+（`post-mount.sh`）用 `hybrid-mount vfs rule add` 把 `module/apex/` 下的文件重定向到 `/apex/`。
+换成别的元模块时，vendor 文件仍能挂载，但 `/apex` 这部分会被跳过（日志标签 `leaudio_marble_fix`），
+单耳的奇数帧长问题就不会修复。
 
 其他机型、ROM 或版本**不要直接套用**——二进制补丁按本机原厂文件的字节校准。
 
@@ -38,6 +44,7 @@ vendor 文件（含蓝牙固件）都由元模块挂载，标签由 `customize.s
 - **开启 LE Audio 单播相关 profile**，走软件 LC3 编码（本机高通 BSP 不支持 LE Audio 硬件 offload）
 - **修补高通蓝牙 HAL**：让它能收发 LE Audio 音频数据包（ISO），并以 HIDL 1.1 接口暴露给系统
 - **shim 层**：控制 ISO 数据的发送节奏，避免蓝牙芯片缓冲溢出
+- **修复单耳"风声"**：蓝牙栈对奇数帧长（如 155 B 的厂商预设）每帧少发 1 字节，补丁 `libbluetooth_jni.so`（仅 APEX `361099999`）
 - **补齐音频配置**：LE Audio codec 能力声明、音频路由
 - **替换蓝牙固件**为高通上游 `2.1.0-00680` 版本（ISO 缓冲 3 → 22，消除双耳卡顿）
 

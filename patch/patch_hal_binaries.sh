@@ -4,10 +4,11 @@
 # 输入（原厂文件，由 scripts/dump_device_binaries.sh 导出）:
 #   module/vendor/lib64/hw/libbluetooth_qti_real.so    原厂 android.hardware.bluetooth@1.0-impl-qti.so
 #   module/vendor/lib64/hw/audio.bluetooth.default.so
+#   module/apex/com.android.bt/lib64/libbluetooth_jni.so   蓝牙栈（patch_bt_jni_odd_octets.py）
 # 就地修改，可重复执行（已打过的补丁会跳过）。
 #
 # 用法:
-#   ./patch/patch_hal_binaries.sh [--module-dir <路径>] [--qti-only | --audio-only]
+#   ./patch/patch_hal_binaries.sh [--module-dir <路径>] [--qti-only | --audio-only | --jni-only]
 #
 # 机器码均经本机已部署件反汇编校准（llvm-objdump）。
 # 命中不足会中止——ROM/版本不同时不要盲改。
@@ -17,13 +18,15 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODDIR="$HERE/module"
 DO_QTI=1
 DO_AUDIO=1
+DO_JNI=1
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --module-dir) MODDIR="$2"; shift 2 ;;
-    --qti-only) DO_AUDIO=0; shift ;;
-    --audio-only) DO_QTI=0; shift ;;
-    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
+    --qti-only) DO_AUDIO=0; DO_JNI=0; shift ;;
+    --audio-only) DO_QTI=0; DO_JNI=0; shift ;;
+    --jni-only) DO_QTI=0; DO_AUDIO=0; shift ;;
+    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
     *) echo "未知参数: $1" >&2; exit 2 ;;
   esac
 done
@@ -107,5 +110,17 @@ open(path, "wb").write(bytes(blob))
 print(f"[✓] audio.bluetooth.default.so 补丁完成: {path}")
 PY
     ok "audio HAL -> $OUT"
+  fi
+fi
+
+# --------------------------------------------------- 蓝牙栈 libbluetooth_jni ---
+if [ "$DO_JNI" = "1" ]; then
+  SRC="$MODDIR/apex/com.android.bt/lib64/libbluetooth_jni.so"
+  if [ ! -f "$SRC" ]; then
+    warn "缺少 $SRC（先跑 scripts/dump_device_binaries.sh）"
+  else
+    echo "[*] libbluetooth_jni.so 补丁（奇数帧长丢 1 字节，6 处）"
+    python3 "$HERE/patch/patch_bt_jni_odd_octets.py" "$SRC"
+    ok "libbluetooth_jni.so -> $SRC"
   fi
 fi

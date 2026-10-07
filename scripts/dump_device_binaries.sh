@@ -18,6 +18,8 @@
 #   vendor/lib64/hw/audio.bluetooth.default.so                  原厂音频 HAL
 #   vendor/etc/vintf/manifest_ukee.xml                          活动 SKU 的 VINTF manifest
 #   vendor/etc/audio/sku_ukee/audio_policy_configuration.xml    活动 SKU 的音频策略
+#   apex/com.android.bt/lib64/libbluetooth_jni.so               蓝牙栈（APEX 361099999）
+#   apex/com.android.bt/etc/bluetooth/le_audio/audio_set_scenarios.json   LE Audio 预设场景（原样留作调试入口）
 # --with-build-deps: 追加 /system/lib64/{libhidlbase,libutils,libc++}.so 到 build/lib/（编译 shim 用）
 # --all: 追加原厂固件/NV、HAL 服务二进制到 dump/（仅取证用）
 set -euo pipefail
@@ -34,7 +36,7 @@ while [ $# -gt 0 ]; do
     --module-dir) MODDIR="$2"; shift 2 ;;
     --with-build-deps) WITH_BUILD_DEPS=1; shift ;;
     --all) ALL=1; shift ;;
-    -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
     *) echo "未知参数: $1" >&2; exit 2 ;;
   esac
 done
@@ -43,6 +45,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODDIR="${MODDIR:-$HERE/module}"
 ADB="adb -s $SERIAL"
 MOD=/data/adb/modules/leaudio_marble_fix
+APEX_VER=361099999   # 补丁偏移按这个版本的 com.android.bt 校准
 
 command -v adb >/dev/null || { echo "[x] adb 不在 PATH"; exit 1; }
 [ "$($ADB get-state 2>/dev/null || true)" = "device" ] || { echo "[x] 设备 $SERIAL 不在线"; exit 1; }
@@ -61,6 +64,9 @@ CORE=(
   "vendor/lib64/hw/audio.bluetooth.default.so|module/vendor/lib64/hw/audio.bluetooth.default.so"
   "vendor/etc/vintf/manifest_ukee.xml|module/vendor/etc/vintf/manifest_ukee.xml"
   "vendor/etc/audio/sku_ukee/audio_policy_configuration.xml|module/vendor/etc/audio/sku_ukee/audio_policy_configuration.xml"
+  # /apex 文件从设备上的解压 APEX 镜像里取，不经过 /apex（本模块的 vfs 规则对 /apex 的两个路径都生效）
+  "apex/com.android.bt/lib64/libbluetooth_jni.so|module/apex/com.android.bt/lib64/libbluetooth_jni.so"
+  "apex/com.android.bt/etc/bluetooth/le_audio/audio_set_scenarios.json|module/apex/com.android.bt/etc/bluetooth/le_audio/audio_set_scenarios.json"
 )
 EXTRA=(
   "vendor/bt_firmware/image/hpbtfw21.tlv|dump/hpbtfw21.factory.tlv"
@@ -82,13 +88,14 @@ if [ "$FROM_BLOCK" = "1" ]; then
   size="$($ADB shell "su -c 'blockdev --getsize64 $dev'" | tr -d '\r')"
   [ -n "$size" ] || { echo "[x] 找不到 $dev"; exit 1; }
   TMP="$(mktemp -d)"
-  trap 'rm -rf "$TMP"' EXIT
   IMG="$TMP/vendor.img"
   echo "[*] 只读导出 $dev（$((size / 1048576)) MiB）-> $IMG"
   $ADB exec-out "su -c 'cat $dev'" > "$IMG"
   [ "$(stat -c%s "$IMG")" = "$size" ] || { echo "[x] 镜像大小不符，导出不完整"; exit 1; }
   debugfs -c -R stats "$IMG" >/dev/null 2>&1 || { echo "[x] vendor 不是 ext4，改用默认方式"; exit 1; }
 fi
+
+trap 'rm -rf "${TMP:-}" "${APEXTMP:-}"' EXIT
 
 report() {
   echo "[✓] $1 -> $2  ($(stat -c%s "$2")B, md5 $(md5sum "$2" | cut -d' ' -f1))"
@@ -113,11 +120,31 @@ from_adb() {
   report "$src" "$dst"
 }
 
+# /apex 文件：把设备上的解压 APEX（zip）拉下来，取出 apex_payload.img（ext4），再用 debugfs 提文件
+APEXTMP=""
+from_apex() {
+  local src="$1" dst="$2" out
+  if [ -z "$APEXTMP" ]; then
+    command -v debugfs >/dev/null && command -v unzip >/dev/null || { echo "[x] 电脑上需要 debugfs（e2fsprogs）和 unzip"; return 1; }
+    local stage="/data/local/tmp/leaudio_apex.tmp"
+    APEXTMP="$(mktemp -d)"
+    $ADB shell "su -c 'cp /data/apex/decompressed/com.android.bt@$APEX_VER.decompressed.apex $stage && chmod 644 $stage'" \
+      || { echo "[x] 设备上没有 com.android.bt@$APEX_VER 的解压 APEX（APEX 版本变了？）"; return 1; }
+    $ADB pull "$stage" "$APEXTMP/bt.apex" >/dev/null 2>&1
+    $ADB shell "su -c 'rm -f $stage'"
+    unzip -p "$APEXTMP/bt.apex" apex_payload.img > "$APEXTMP/payload.img"
+  fi
+  out="$(debugfs -c -R "dump /$src $dst" "$APEXTMP/payload.img" 2>&1)"
+  if [ ! -s "$dst" ]; then rm -f "$dst"; echo "[!] APEX 镜像中不存在: $src（跳过）"; return 1; fi
+  report "apex/$src" "$dst"
+}
+
 get() {
   local src="$1" dst="$2"
   case "$dst" in module/*) dst="$MODDIR/${dst#module/}" ;; *) dst="$HERE/$dst" ;; esac
   mkdir -p "$(dirname "$dst")"
   case "$src" in
+    apex/com.android.bt/*) from_apex "${src#apex/com.android.bt/}" "$dst" ;;
     vendor/bt_firmware/image/hpbtfw21.tlv)
       # 固件不在 vendor 镜像里；模块启用时它被模块 bind mount 成上游版本
       if [ "$MODULE_ACTIVE" = "1" ]; then echo "[!] 模块启用中，$src 不是原厂件（跳过）"; return 1; fi
