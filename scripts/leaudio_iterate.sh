@@ -2,12 +2,12 @@
 # leaudio_iterate.sh — LE Audio shim 热更新迭代脚本
 #
 # 用法:
-#   ./leaudio_iterate.sh deploy <shim.so>     # 部署 .so + 重启 HAL + 健康监测(崩溃自动回退 LKG)
-#   ./leaudio_iterate.sh restart               # 只重启 HAL 服务 + 健康监测
-#   ./leaudio_iterate.sh rollback              # 回退到上次部署前的备份 (LKG)
-#   ./leaudio_iterate.sh watch [秒]            # 实时观测 BluetoothHciHook 日志 + 到期摘要
-#   ./leaudio_iterate.sh musictest [秒数]       # 自动播放 + 连续采样（流/路由/丢帧/速率）
-#   ./leaudio_iterate.sh status                # 只读状态总览
+#   ./scripts/leaudio_iterate.sh deploy <shim.so>     # 部署 .so + 重启 HAL + 健康监测(崩溃自动回退 LKG)
+#   ./scripts/leaudio_iterate.sh restart               # 只重启 HAL 服务 + 健康监测
+#   ./scripts/leaudio_iterate.sh rollback              # 回退到上次部署前的备份 (LKG)
+#   ./scripts/leaudio_iterate.sh watch [秒]            # 实时观测 BluetoothHciHook 日志 + 到期摘要
+#   ./scripts/leaudio_iterate.sh musictest [秒数]       # 自动播放 + 连续采样（流/路由/丢帧/速率）
+#   ./scripts/leaudio_iterate.sh status                # 只读状态总览
 #
 # 环境要求: 设备 $SERIAL 在线且已解锁; 模块 leaudio_marble_fix enabled (自动检查)
 set -u

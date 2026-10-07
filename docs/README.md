@@ -21,10 +21,9 @@
 module/
 ├── module.prop
 ├── system.prop                       LE Audio profile 开关、关闭 offload、shim 开关
-├── post-fs-data.sh                   开机 bind mount 上游固件到 /vendor/bt_firmware
-├── service.sh                        固件挂载兜底
-├── firmware/hpbtfw21.tlv             上游固件 00680（脚本下载，不入库）
+├── customize.sh                      安装时设置 vendor 文件的 SELinux 标签和属主
 └── vendor/
+    ├── bt_firmware/image/hpbtfw21.tlv  上游固件 00680（脚本下载，不入库）
     ├── lib64/hw/                     （均不入库）
     │   ├── android.hardware.bluetooth@1.0-impl-qti.so   shim，沿用原厂 SONAME
     │   ├── libbluetooth_qti_real.so                      原厂 impl-qti.so 改 SONAME，4 处补丁

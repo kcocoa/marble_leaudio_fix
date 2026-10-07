@@ -21,7 +21,7 @@ set -e
 SER="${SER:-${SERIAL:?export SERIAL=<你的序列号>}}"
 MOD=/data/adb/modules/leaudio_marble_fix
 HW=$MOD/vendor/lib64/hw
-SRC=${1:-"$(dirname "$0")/module/vendor/lib64/hw/android.hardware.bluetooth@1.0-impl-qti.so"}
+SRC=${1:-"$(dirname "$0")/../module/vendor/lib64/hw/android.hardware.bluetooth@1.0-impl-qti.so"}
 
 adb -s $SER push "$SRC" /data/local/tmp/shim_new.so
 adb -s $SER shell su -c "stop vendor.bluetooth-1-0-qti"

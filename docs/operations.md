@@ -9,7 +9,8 @@
 完整步骤见根目录 `README.md`。各脚本的产物均被 `.gitignore` 排除，细节见脚本头注释与
 `docs/architecture.md` §2.2/§3。
 
-- `deploy_module.sh` 安装或更新整个模块，**之后必须重启**。
+- 正式安装用 `scripts/build_zip.sh` 打的 zip（KernelSU 管理器 →「模块」→「从本地安装」），**之后必须重启**。
+- `scripts/deploy_module.sh` 只是调试时的快捷方式：直接推文件到 `/data/adb/modules/`，KernelSU 不会替它跑 `customize.sh`，所以脚本自己在设备上 source 一遍，标签和 zip 安装一致。
 - 只改了 shim 时，用下面第 1 节的热更新，不用重启。
 - `dump_device_binaries.sh` 默认从 `/vendor` 读，本模块启用时拒绝运行（此时 `/vendor` 上是模块的文件）。
   这时用 `--from-block`：只读导出整个 vendor 块设备（约 2 GB）到电脑，用 `debugfs` 提取原厂文件。
@@ -33,7 +34,7 @@ export SERIAL=1a2b3c4d
 
 ```bash
 ./scripts/build_shim.sh                          # 产物直接写入 module/vendor/lib64/hw/
-SERIAL=<adb 序列号> ./deploy_shim_fileonly.sh
+SERIAL=<adb 序列号> ./scripts/deploy_shim_fileonly.sh
 ```
 
 脚本做的事（**顺序不能变**）：

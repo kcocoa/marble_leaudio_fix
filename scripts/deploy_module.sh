@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
-# deploy_module.sh — 把 module/ 安装（或更新）到设备 /data/adb/modules/leaudio_marble_fix。
+# deploy_module.sh — 【仅供调试】把 module/ 直接推到设备 /data/adb/modules/leaudio_marble_fix。
+# 正式安装一律用 scripts/build_zip.sh 打出来的 zip。
 # 装完需要重启设备才生效。
 #
-# 每个文件先复制成 <name>.new 再 mv 覆盖，最后统一设置 SELinux label：
+# 每个文件先复制成 <name>.new 再 mv 覆盖：
 #   - 运行中的 HAL 已 mmap 的旧 .so 不会被原地改写（原地 cp 会让它 SIGSEGV）
 #   - 不用 adb push 直接写模块目录（label 会变成 adb_data_file，HAL 无法加载）
+# 之后在设备上 source module/customize.sh 设置 SELinux label 和属主——KernelSU 只有装 zip 时才会跑它，
+# adb 部署要自己跑；这里提供 set_perm / set_perm_recursive / ui_print 的最小实现（同 KernelSU 安装环境）。
 #
-# 用法: SERIAL=<adb 序列号> ./deploy_module.sh
+# 用法: SERIAL=<adb 序列号> ./scripts/deploy_module.sh
 set -euo pipefail
 
 SERIAL="${SERIAL:?export SERIAL=<adb 序列号>}"
-HERE="$(cd "$(dirname "$0")" && pwd)"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 M="$HERE/module"
 DST=/data/adb/modules/leaudio_marble_fix
 STAGE=/data/local/tmp/leaudio_module
@@ -19,9 +22,8 @@ ADB="adb -s $SERIAL"
 FILES=(
   module.prop
   system.prop
-  post-fs-data.sh
-  service.sh
-  firmware/hpbtfw21.tlv
+  customize.sh
+  vendor/bt_firmware/image/hpbtfw21.tlv
   vendor/lib64/hw/android.hardware.bluetooth@1.0-impl-qti.so
   vendor/lib64/hw/libbluetooth_qti_real.so
   vendor/lib64/hw/audio.bluetooth.default.so
@@ -34,7 +36,7 @@ for f in "${FILES[@]}"; do
 done
 grep -q '<name>IBluetoothHci</name>' "$M/vendor/etc/vintf/manifest_ukee.xml" &&
 grep -q 'tagName="BLE Headset In"' "$M/vendor/etc/audio/sku_ukee/audio_policy_configuration.xml" ||
-  { echo "[x] vendor 配置还是原厂版本，先跑 python3 scripts/patch_vendor_configs.py"; exit 1; }
+  { echo "[x] vendor 配置还是原厂版本，先跑 python3 patch/patch_vendor_configs.py"; exit 1; }
 
 [ "$($ADB get-state 2>/dev/null)" = "device" ] || { echo "[x] 设备 $SERIAL 不在线"; exit 1; }
 
@@ -52,9 +54,23 @@ trap 'rm -f "$script"' EXIT
     echo "chown 0:0 '$DST/$f.new'; chmod $mode '$DST/$f.new'"
     echo "mv -f '$DST/$f.new' '$DST/$f'"
   done
-  echo "chcon -R u:object_r:vendor_file:s0 '$DST/vendor'"
-  echo "chcon -R u:object_r:vendor_configs_file:s0 '$DST/vendor/etc'"
-  echo "chcon u:object_r:bt_firmware_file:s0 '$DST/firmware/hpbtfw21.tlv'"
+  # KernelSU 安装环境的最小复刻，然后跑 customize.sh
+  cat <<'HELPERS'
+ui_print() { echo "$1"; }
+set_perm() {
+  chown "$2:$3" "$1" || return 1
+  chmod "$4" "$1" || return 1
+  chcon "${5:-u:object_r:system_file:s0}" "$1" || return 1
+}
+set_perm_recursive() {
+  find "$1" -type d | while read -r d; do set_perm "$d" "$2" "$3" "$4" "$6"; done
+  find "$1" \( -type f -o -type l \) | while read -r f; do set_perm "$f" "$2" "$3" "$5" "$6"; done
+}
+HELPERS
+  echo "MODPATH='$DST'"
+  echo ". '$DST/customize.sh'"
+  # 旧版本留下的启动脚本和固件目录（现在固件由元模块挂载）
+  echo "rm -rf '$DST/post-fs-data.sh' '$DST/service.sh' '$DST/firmware'"
   echo "rm -rf '$STAGE'"
 } > "$script"
 

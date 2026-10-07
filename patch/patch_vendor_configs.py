@@ -15,7 +15,7 @@
 
 就地修改，可重复执行（已改过的文件跳过）；结构与预期不符时中止，不做猜测性修改。
 
-用法: python3 scripts/patch_vendor_configs.py [--module-dir <路径>]
+用法: python3 patch/patch_vendor_configs.py [--module-dir <路径>]
 """
 import argparse
 import os

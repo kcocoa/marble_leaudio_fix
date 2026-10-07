@@ -9,7 +9,7 @@
 *.csv
 *.png
 *.so.*
-bluetooth_hci_shim/android.hardware.bluetooth@*
+patch/bluetooth_hci_shim/android.hardware.bluetooth@*
 
 # 手机侧内容一律不入库：
 # - monitor_runs/   logcat 衍生数据（含全量设备日志）

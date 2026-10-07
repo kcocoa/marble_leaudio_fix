@@ -58,7 +58,7 @@ AudioFlinger
 必须**静态改文件**，不能运行时 `mprotect` 改 `.text`：
 `SELinux: avc: denied { execmem } for ... scontext=hal_bluetooth_default`，运行时改必崩。
 
-补丁脚本：`scripts/patch_hal_binaries.sh`（QTI HAL 部分调用 `patch_qti_iso_rx.py`，从原厂文件生成，可重复执行）。
+补丁脚本：`patch/patch_hal_binaries.sh`（QTI HAL 部分调用 `patch/patch_qti_iso_rx.py`，从原厂文件生成，可重复执行）。
 
 | 地址 | 原值 | 改后 | 作用 |
 |---|---|---|---|
@@ -85,7 +85,7 @@ AudioFlinger
 
 ### 2.3 shim（C++，NDK30）
 
-`bluetooth_hci_shim/BluetoothHciHook.cpp`，编译成 `android.hardware.bluetooth@1.0-impl-qti.so`
+`patch/bluetooth_hci_shim/BluetoothHciHook.cpp`，编译成 `android.hardware.bluetooth@1.0-impl-qti.so`
 （**SONAME 继承原厂名**，进程加载时无感知替换）。
 
 钩子点全部选在 **libhidlbase / libutils / iface 库**（无 CFI），
@@ -102,18 +102,18 @@ AudioFlinger
 开机画面后连按音量减 3 次（按-松）。安全模式下所有模块被 disable、`su` 二进制不可用，
 但 LineageOS userdebug 可 `adb root` 拿到 uid=0。这是 bootloop 的唯一救援手段。
 
-### 2.6 固件 overlay（`post-fs-data.sh` bind-mount）
+### 2.6 固件（`vendor/bt_firmware/image/hpbtfw21.tlv`，由元模块挂载）
 
-`/vendor/bt_firmware` 是独立的 vfat 挂载点（`sde36`），嵌套在 `/vendor` 内。
-模块 overlay 无法遮盖这个子挂载点，因此在模块的 `post-fs-data.sh` 中使用内存级 `mount -o bind`：
+固件和其他 vendor 文件一样，放在模块的 `vendor/` 下由元模块挂载，标签和属主由 `customize.sh` 设置
+（`bt_firmware_file`，`bluetooth:net_bt`，目录 0550、文件 0644）。模块不自己 `mount`。
 
-```bash
-mount -o bind $MODDIR/firmware/hpbtfw21.tlv /vendor/bt_firmware/image/hpbtfw21.tlv
-```
+`/vendor/bt_firmware` 是独立的 vfat 挂载点（`sde36`，嵌套在 `/vendor` 内）。内核的 overlayfs 不接受 vfat 做下层
+（dmesg：`overlayfs: filesystem on '/vendor/bt_firmware' not supported`），所以**元模块用 overlayfs 时这条挂载会失败**，
+并且 hybrid_mount 会回滚**全部**模块的挂载。这是有意保留的行为：遇到的用户应改用 vfs 或 magic mount
+（hybrid_mount：`default_mode = "vfs"` 或 `"magic"`）。
 
-- 权限设为 `chmod 644`、`chown bluetooth:net_bt`、`chcon u:object_r:bt_firmware_file:s0`。
-- 执行时机：`post-fs-data` 阶段，早于 `class hal` 的 `vendor.bluetooth-1-0-qti` 服务启动。
-- 零写入系统分区，开机自启生效，模块禁用时完全不留痕迹。
+- 控制器每次开蓝牙时从该路径读固件，验签在芯片 ROM 里，所以必须是高通官方签名的上游版本。
+- 零写入系统分区，模块禁用或移除后完全还原。
 
 ## 3. 构建配方
 
@@ -131,7 +131,7 @@ NDK=/opt/android-sdk/ndk/30.0.16248370    # clang 21.0.0 r574158c，与设备平
 T=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin
 $T/clang++ --target=aarch64-linux-android24 -shared -fPIC -O2 -std=c++17 -Ibuild/inc \
   -Wl,-soname,android.hardware.bluetooth@1.0-impl-qti.so \
-  bluetooth_hci_shim/BluetoothHciHook.cpp -o module/vendor/lib64/hw/android.hardware.bluetooth@1.0-impl-qti.so \
+  patch/bluetooth_hci_shim/BluetoothHciHook.cpp -o module/vendor/lib64/hw/android.hardware.bluetooth@1.0-impl-qti.so \
   -Lbuild/lib -Lmodule/vendor/lib64/hw -lhidlbase -lutils -lc++ -l:libbluetooth_qti_real.so -llog
 ```
 

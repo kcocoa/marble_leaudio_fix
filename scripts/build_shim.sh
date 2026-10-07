@@ -14,7 +14,7 @@
 #   ./scripts/build_shim.sh [--out <path>] [--ndk <dir>]
 #
 # 产物默认直接写入模块: module/vendor/lib64/hw/android.hardware.bluetooth@1.0-impl-qti.so
-# 已安装模块时可热更新: ./deploy_shim_fileonly.sh
+# 已安装模块时可热更新: ./scripts/deploy_shim_fileonly.sh
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -80,7 +80,7 @@ echo "[+] 编译 shim -> $OUT"
 "$T/clang++" --target=aarch64-linux-android24 -shared -fPIC -O2 -std=c++17 \
   -I"$B/inc" \
   -Wl,-soname,android.hardware.bluetooth@1.0-impl-qti.so \
-  "$HERE/bluetooth_hci_shim/BluetoothHciHook.cpp" -o "$OUT" \
+  "$HERE/patch/bluetooth_hci_shim/BluetoothHciHook.cpp" -o "$OUT" \
   -L"$B/lib" -L"$HW" -lhidlbase -lutils -lc++ -l:libbluetooth_qti_real.so -llog
 "$T/llvm-strip" --strip-all "$OUT"
 

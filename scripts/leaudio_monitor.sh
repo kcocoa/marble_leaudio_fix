@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # LE Audio 事件触发式全量快照监测器
 #
-#   ./leaudio_monitor.sh [秒数=900]
+#   ./scripts/leaudio_monitor.sh [秒数=900]
 #
 # 原理：
 #   - 全量 logcat 流（所有 buffer）→ 文件，同时 tail -F 做事件触发
@@ -16,9 +16,10 @@
 #
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$HERE/.." && pwd)"
 ADB="adb -s ${SERIAL:?export SERIAL=<你的设备序列号>}"
 DUR="${1:-900}"
-OUT="$HERE/monitor_runs/monitor_$(date +%m%d_%H%M%S)"
+OUT="$ROOT/monitor_runs/monitor_$(date +%m%d_%H%M%S)"
 mkdir -p "$OUT/snapshots"
 echo "[+] 输出: $OUT  时长 ${DUR}s"
 

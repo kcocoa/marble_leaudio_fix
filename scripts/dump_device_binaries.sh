@@ -140,6 +140,6 @@ done
 cat <<EOF
 
 [=] 导出完成。下一步修改导出的原厂文件：
-      ./scripts/patch_hal_binaries.sh
-      python3 scripts/patch_vendor_configs.py
+      ./patch/patch_hal_binaries.sh
+      python3 patch/patch_vendor_configs.py
 EOF

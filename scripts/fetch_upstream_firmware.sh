@@ -32,7 +32,7 @@ while [ $# -gt 0 ]; do
 done
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DEST="${DEST:-$HERE/module/firmware}"
+DEST="${DEST:-$HERE/module/vendor/bt_firmware/image}"
 
 SOURCES=(
   "https://gitlab.com/kernel-firmware/linux-firmware/-/raw/main/qca/hpbtfw21.tlv"

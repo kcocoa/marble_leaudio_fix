@@ -7,7 +7,7 @@
 # 就地修改，可重复执行（已打过的补丁会跳过）。
 #
 # 用法:
-#   ./scripts/patch_hal_binaries.sh [--module-dir <路径>] [--qti-only | --audio-only]
+#   ./patch/patch_hal_binaries.sh [--module-dir <路径>] [--qti-only | --audio-only]
 #
 # 机器码均经本机已部署件反汇编校准（llvm-objdump）。
 # 命中不足会中止——ROM/版本不同时不要盲改。
@@ -39,7 +39,7 @@ if [ "$DO_QTI" = "1" ]; then
     warn "缺少 $SRC（先跑 scripts/dump_device_binaries.sh）"
   else
     echo "[*] QTI HAL 补丁（patch_qti_iso_rx.py：SONAME 改名 + 4 处 ISO 接收补丁）"
-    python3 "$HERE/patch_qti_iso_rx.py" "$SRC" "$SRC"
+    python3 "$HERE/patch/patch_qti_iso_rx.py" "$SRC" "$SRC"
     ok "QTI HAL -> $SRC"
   fi
 fi

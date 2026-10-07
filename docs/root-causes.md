@@ -464,5 +464,6 @@ hold(send->NCP) avg=19880us max=24936us n=750, send call avg=128us
 
 **持久化落地**：
 - 将固件存入模块目录 `$MODDIR/firmware/hpbtfw21.tlv`。
-- 在 `$MODDIR/post-fs-data.sh` 中通过 `mount -o bind` 将其覆盖到 `/vendor/bt_firmware/image/hpbtfw21.tlv`（系统分区零写入）。
+- 放在模块的 `vendor/bt_firmware/image/hpbtfw21.tlv`，由元模块挂载到 `/vendor/bt_firmware/image/hpbtfw21.tlv`（系统分区零写入；
+  早期版本用 `post-fs-data.sh` 的 `mount -o bind`，见 architecture.md 2.6）。
 - 开机时在 Bluetooth HAL 启动前自动挂载生效，重启完全自愈。
