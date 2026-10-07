@@ -1,6 +1,6 @@
 id=leaudio_marble_fix
 name=LE Audio Enabler for Redmi Note 12 Turbo (marble)
-version=v4.2-upstream-fw
-versionCode=4
+version=v4.3-upstream-fw
+versionCode=5
 author=kcocoa
 description=Enables LE Audio unicast client, software LC3 routing, upgrades Bluetooth HCI HAL to HIDL 1.1, and overlays QCA6490 Bluetooth firmware to 2.1.0-00680 (22 ISO buffers, zero drop).
