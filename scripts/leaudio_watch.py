@@ -70,6 +70,50 @@ def device_now():
         return time.time()
 
 
+LABELS = {}              # handle -> 显示名，如 "R(h8,主)"
+_last_refresh = 0.0
+
+
+def lab(h):
+    return LABELS.get(h, "h%d" % h)
+
+
+def resolve(text):
+    """事件文本里的 @handle@ 占位符换成标签（标签可能在事件之后才查到）。"""
+    return re.sub(r"@(\d+)@", lambda m: lab(int(m.group(1))), text)
+
+
+def refresh_labels():
+    """从 dumpsys 读 CIS/ACL handle -> 耳机位置（L/R）+ 主耳机（group lead）。返回说明文字。"""
+    global _last_refresh
+    _last_refresh = time.time()
+    txt = sh("dumpsys bluetooth_manager")
+    cis = {int(h): a.lower() for h, a in re.findall(r"conn_handle: (\d+),\s+addr: (\S+)", txt)}
+    leads = {a.lower() for a in re.findall(r"group lead: (\S+)", txt) if a != "null"}
+    loc, acl, cur = {}, {}, None
+    for line in txt.splitlines():
+        m = re.search(r"Device \[(\S+?)\]", line)
+        if m:
+            cur = m.group(1).lower()
+            m2 = re.search(r"acl_handle: (\d+)", line)
+            if m2:
+                acl[int(m2.group(1))] = cur
+        m = re.search(r"Audio Locations: Sink= ([^,]+)", line)
+        if m and cur:
+            l = m.group(1).lower()
+            loc[cur] = "L" if "left" in l else "R" if "right" in l else m.group(1).strip()
+    for h, a in cis.items():
+        if a in loc:
+            LABELS[h] = "%s(h%d%s)" % (loc[a], h, ",主" if a in leads else "")
+    for h, a in acl.items():
+        if a in loc and h < 0xf00:                  # 0xffff 是无效 handle
+            LABELS[h] = "%s-ACL(h%d%s)" % (loc[a], h, ",主" if a in leads else "")
+    if not any(h in LABELS for h in cis):
+        return "没查到耳机位置（dumpsys 里没有 LE Audio 流？），输出里只显示 handle"
+    desc = "、".join(LABELS[h] for h in sorted(cis) if h in LABELS)
+    return "CIS: %s；主耳机: %s" % (desc, "、".join(sorted(a[-5:] for a in leads)) or "无（没有 group lead）")
+
+
 class Lc3:
     def __init__(self, dt_us, rate):
         path = ctypes.util.find_library("lc3") or "/usr/lib/liblc3.so.1"
@@ -118,6 +162,7 @@ class Watch:
         self.ncp = collections.Counter()
         self.events = []                               # (t, kind, text)   kind: bad / info
         self.snoop_cur = b""
+        self.relabel = False
 
     # ---- 单条记录
     def feed(self, t, flags, p):
@@ -170,7 +215,7 @@ class Watch:
         elif code == 0x05 and len(p) >= 7:             # Disconnection Complete
             r = p[6]
             self.events.append((t, "bad" if r not in (0x13, 0x16) else "info",
-                                "断开 handle %d 原因 0x%02x %s" % (u16(p[4:6]) & 0xfff, r, REASONS.get(r, ""))))
+                                "断开 @%d@ 原因 0x%02x %s" % (u16(p[4:6]) & 0xfff, r, REASONS.get(r, ""))))
         elif code == 0x10:
             self.events.append((t, "bad", "控制器 Hardware Error 0x%02x" % p[3]))
         elif code == 0x3e and len(p) > 8:
@@ -178,9 +223,10 @@ class Watch:
             if sub == 0x19:                            # CIS Established
                 st, h = p[4], u16(p[5:7])
                 self.events.append((t, "bad" if st else "info",
-                                    "CIS handle %d %s" % (h, "建立失败 0x%02x" % st if st else "建立")))
+                                    "CIS @%d@ %s" % (h, "建立失败 0x%02x" % st if st else "建立")))
+                self.relabel = True                    # CIS 变了，重新查标签
             elif sub == 0x03 and p[4] == 0:            # Connection Update Complete
-                self.events.append((t, "info", "ACL handle %d 连接间隔 %.1f ms" % (u16(p[5:7]) & 0xfff, u16(p[7:9]) * 1.25)))
+                self.events.append((t, "info", "ACL @%d@ 连接间隔 %.1f ms" % (u16(p[5:7]) & 0xfff, u16(p[7:9]) * 1.25)))
 
     # ---- 拉取 + 增量处理
     def poll(self):
@@ -219,24 +265,25 @@ class Watch:
         return out
 
     def inflight(self, handles):
-        return {h: self.sent_pkts[h] - self.ncp.get(h, 0) for h in handles}
+        # btsnoop 从流中途开始时，开头会有几条 NCP 对应文件之前发出的包，差值会偏小几个，截到 0
+        return {h: max(0, self.sent_pkts[h] - self.ncp.get(h, 0)) for h in handles}
 
 
 def anomalies(stats, ev, infl):
     why = []
     for h, s in sorted(stats.items()):
         if s["missing"]:
-            why.append("handle %d 缺 %d 帧" % (h, s["missing"]))
+            why.append("%s 缺 %d 帧" % (lab(h), s["missing"]))
         if s["gap"]:
-            why.append("handle %d 有 %d 次发送间隔 >%.0f ms（最大 %.1f ms）" % (h, s["gap"], GAP_MS, s["maxdt"]))
+            why.append("%s 有 %d 次发送间隔 >%.0f ms（最大 %.1f ms）" % (lab(h), s["gap"], GAP_MS, s["maxdt"]))
         if s["bad"]:
-            why.append("handle %d 有 %d 帧 LC3 解码异常" % (h, s["bad"]))
+            why.append("%s 有 %d 帧 LC3 解码异常" % (lab(h), s["bad"]))
         if s["clip"]:
-            why.append("handle %d 有 %d 帧削波" % (h, s["clip"]))
-    why += [e[2] for e in ev if e[1] == "bad"]
+            why.append("%s 有 %d 帧削波" % (lab(h), s["clip"]))
+    why += [resolve(e[2]) for e in ev if e[1] == "bad"]
     for h, v in sorted(infl.items()):
         if v > BUFFERS - 2:
-            why.append("handle %d 控制器积压 %d 个包（缓冲 %d）" % (h, v, BUFFERS))
+            why.append("%s 控制器积压 %d 个包（缓冲 %d）" % (lab(h), v, BUFFERS))
     return why
 
 
@@ -273,7 +320,7 @@ def main():
     os.makedirs(out)
     logf = open(os.path.join(out, "watch.log"), "w", buffering=1)
     csvf = open(os.path.join(out, "stats.csv"), "w", buffering=1)
-    csvf.write("time,handle,sdu,missing,gap_gt15ms,jitter_gt12.5ms,max_interval_ms,lc3_bad,clip,inflight\n")
+    csvf.write("time,handle,side,sdu,missing,gap_gt15ms,jitter_gt12.5ms,max_interval_ms,lc3_bad,clip,inflight\n")
 
     def say(msg=""):
         print(msg, flush=True)
@@ -308,6 +355,7 @@ def main():
     w = Watch(lc3)
     last_pids = pids()
     say("[+] 进程 (com.android.bluetooth - HAL): %s" % last_pids)
+    say("[+] 耳机: " + refresh_labels())
     say("[+] 读取现有的 btsnoop ……")
     if not w.poll():
         sys.exit("[x] 读不到 btsnoop（需要 root，且 btsnoop 模式为 full）")
@@ -317,6 +365,7 @@ def main():
         w.iso[h].clear()
     iso_from = w.last_t
     ev_idx = 0
+    w.relabel = False
     say("[+] 开始。")
 
     t_end = time.time() + a.duration if a.duration else None
@@ -336,6 +385,9 @@ def main():
                 say("[!] %s 读 btsnoop 失败" % hhmmss(device_now()))
                 continue
             now_dev = device_now()
+            if (w.relabel or any(h not in LABELS for h in w.iso)) and time.time() - _last_refresh > 5:
+                w.relabel = False
+                say("[+] 耳机: " + refresh_labels())
             while not logq.empty():
                 t, line = logq.get()
                 w.events.append((t, "bad", "logcat: " + line))
@@ -351,9 +403,9 @@ def main():
             infl = w.inflight(stats)
             parts = []
             for h, s in sorted(stats.items()):
-                parts.append("h%d: %d sdu 缺%d 跳%d 抖%d 最大%.1fms 坏%d 削%d" %
-                             (h, s["n"], s["missing"], s["gap"], s["jit"], s["maxdt"], s["bad"], s["clip"]))
-                csvf.write("%s,%d,%d,%d,%d,%d,%.1f,%d,%d,%d\n" % (hhmmss(w.last_t), h, s["n"], s["missing"], s["gap"],
+                parts.append("%s: %d sdu 缺%d 跳%d 抖%d 最大%.1fms 坏%d 削%d" %
+                             (lab(h), s["n"], s["missing"], s["gap"], s["jit"], s["maxdt"], s["bad"], s["clip"]))
+                csvf.write("%s,%d,%s,%d,%d,%d,%d,%.1f,%d,%d,%d\n" % (hhmmss(w.last_t), h, lab(h).split("(")[0], s["n"], s["missing"], s["gap"],
                                                                   s["jit"], s["maxdt"], s["bad"], s["clip"], infl.get(h, 0)))
                 for k in ("n", "missing", "gap", "jit", "bad", "clip"):
                     summary[h][k] += s[k]
@@ -378,12 +430,12 @@ def main():
                 say("")
                 say("=== 标记 #%d  %s（回看 %.0f 秒，已存 mark_%d/）" % (n_mark, hhmmss(now_dev), a.window, n_mark))
                 for h, s in sorted(mstats.items()):
-                    say("    h%d: %d sdu，缺帧 %d，间隔>%.0fms %d 次（最大 %.1f ms），LC3 异常 %d，削波 %d，积压 %d" %
-                        (h, s["n"], s["missing"], GAP_MS, s["gap"], s["maxdt"], s["bad"], s["clip"], minfl.get(h, 0)))
+                    say("    %s: %d sdu，缺帧 %d，间隔>%.0fms %d 次（最大 %.1f ms），LC3 异常 %d，削波 %d，积压 %d" %
+                        (lab(h), s["n"], s["missing"], GAP_MS, s["gap"], s["maxdt"], s["bad"], s["clip"], minfl.get(h, 0)))
                 if not mstats:
                     say("    这段时间没有 ISO 数据")
                 for e in mev:
-                    say("    %s %s" % (hhmmss(e[0]), e[2]))
+                    say("    %s %s" % (hhmmss(e[0]), resolve(e[2])))
                 if mwhy:
                     verdict = "主机侧有异常 -> 问题在手机这边：" + "；".join(mwhy)
                 else:
@@ -399,12 +451,12 @@ def main():
     say("")
     say("====== 总结 ======")
     for h, s in sorted(summary.items()):
-        say("h%d: %d sdu，缺帧 %d，间隔>%.0fms %d 次，间隔>%.1fms %d 次，最大间隔 %.1f ms，LC3 异常 %d，削波 %d" %
-            (h, s["n"], s["missing"], GAP_MS, s["gap"], JITTER_MS, s["jit"], s["maxdt"], s["bad"], s["clip"]))
+        say("%s: %d sdu，缺帧 %d，间隔>%.0fms %d 次，间隔>%.1fms %d 次，最大间隔 %.1f ms，LC3 异常 %d，削波 %d" %
+            (lab(h), s["n"], s["missing"], GAP_MS, s["gap"], JITTER_MS, s["jit"], s["maxdt"], s["bad"], s["clip"]))
     bad_ev = [e for e in w.events if e[1] == "bad"]
     say("异常事件 %d 条" % len(bad_ev))
     for e in bad_ev[-20:]:
-        say("  %s %s" % (hhmmss(e[0]), e[2]))
+        say("  %s %s" % (hhmmss(e[0]), resolve(e[2])))
     for n, tm, flagged in mark_log:
         say("标记 #%d %s: %s" % (n, tm, "主机侧有异常" if flagged else "主机侧干净"))
     say("日志: %s" % out)
