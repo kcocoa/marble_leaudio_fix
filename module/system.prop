@@ -13,5 +13,6 @@ ro.bluetooth.leaudio_offload.supported=false
 # BluetoothHciHook shim 开关：
 # patchring 修复 QTI 环形缓冲区拒绝 ISO 包（type 5）的 bug，必须为 1。
 # 其余开关都有内建默认值，需要调时再 setprop（见 docs/architecture.md 第 4 节）：
-#   cig.maxlat = 10 ms  截断 Max_Transport_Latency，实测必要（不截会掉到 40 ms/84.57 ms 并丢首包）
+#   cig.maxlat = 20 ms  截断 Max_Transport_Latency，实测必要（不截会掉到 40 ms/84.57 ms 并丢首包；
+#                       20 ms 让控制器给 FT=2，可跨间隔重传）
 persist.vendor.leaudio.iso.patchring=1

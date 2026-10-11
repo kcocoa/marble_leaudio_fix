@@ -727,9 +727,13 @@ int32_t HandleSendIsoData(const ::android::hardware::Parcel& data,
 // credit pool is 0 until the first NCP arrives one ISO interval later.
 // Capping it to 10 ms makes the controller choose 10 ms / 7210us, which runs
 // with 8/22 in flight and zero drops.
+// The default is 20 ms: for 155 B the controller then keeps ISO_Interval=10ms,
+// BN=1, NSE=4 but gives FT=2 (transport latency 8330 -> 18330us), so a payload
+// that misses its own CIS event can still be retried in the next one. The
+// in-flight count is the same as with 10 ms.
 // Incoming binder buffers are read-only, so the command is copied, patched and
 // sent via the stock sendDataToController(COMMAND), exactly what the stock
-// sendHciCommand does. Prop persist.vendor.leaudio.cig.maxlat (ms, default 10,
+// sendHciCommand does. Prop persist.vendor.leaudio.cig.maxlat (ms, default 20,
 // 0 = off). Returns true if the transaction was fully handled here.
 // ---------------------------------------------------------------------------
 // Re-read on every LE Set CIG Parameters (rare), so it can be tuned with
@@ -742,7 +746,7 @@ static int PropInt(const char* name, int def, int lo, int hi) {
     }
     return def;
 }
-static int CigMaxLatencyCap() { return PropInt("persist.vendor.leaudio.cig.maxlat", 10, 0, 4000); }
+static int CigMaxLatencyCap() { return PropInt("persist.vendor.leaudio.cig.maxlat", 20, 0, 4000); }
 
 bool MaybeRewriteCigParams(const ::android::hardware::Parcel& data,
                            ::android::hardware::Parcel* reply) {

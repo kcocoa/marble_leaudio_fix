@@ -15,7 +15,8 @@
    （0x1e，暂停再播放可恢复；更稳的备选是单耳也用 120 B，见 root-causes.md 第 15 节）。原因没查清（见 `docs/root-causes.md` 第 15 节）：**不是 RTN**（控制器给的 NSE 恒为 4），
    怀疑和被追加的 CIS 排在前面还是后面、新 ACL 连接的状态有关。
    要继续查的话做对照实验：固定先连 / 后连的耳机顺序，开 shim 日志抓 `CIG params`（先把每包日志关掉，不然会被刷掉），
-   并在建流后立刻拉 btsnoop（滚动日志只保留约 10 分钟）；再试一次关掉 shim 的 10 ms 截断（`persist.vendor.leaudio.cig.maxlat=0`）。
+   并在建流后立刻拉 btsnoop（滚动日志只保留约 10 分钟）；再试一次关掉 shim 的截断（`persist.vendor.leaudio.cig.maxlat=0`；默认已从 10 改成 20 ms，FT=2，
+   这对追加 CIS 有没有影响也没测过）。
 
 3. 广播（BIS）路径也用同一个 `Encode`，奇数帧长时发送长度会比真实长度多 1 字节（原来是少 1 字节）。
    没有用到广播，没测。
@@ -27,3 +28,10 @@
    目前对它只有 2 处字节补丁（`UpdateSinkMetadata` 空函数化，见 `patch/patch_hal_binaries.sh`）。
    可以评估改成从源码重新编译一份带修复的版本，而不是继续字节补丁。
    两者都不带自身签名，`/vendor` 靠 AVB / dm-verity 整体校验，模块 bind mount 不受影响。
+
+## 待观察：一只耳朵整段有杂音
+
+5. 新耳机（左 `a0:37` / 右 `18:64`）出现过左耳整段一直有杂音，暂停再播放（CIG 重建）后消失，
+   重建前后 CIS 参数和时隙顺序完全相同（`root-causes.md` 第 16 节）。默认 `cig.maxlat` 已从 10 改成 20 ms（FT=2）。
+   正常听几天：不再出现就把第 16 节的结论改为"已解决"；还会出现就开 `scripts/leaudio_watch.py` 打标记，
+   并改回 10 对照（`setprop persist.vendor.leaudio.cig.maxlat 10`，暂停再播放生效）。

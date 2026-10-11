@@ -172,14 +172,17 @@ $T/clang++ --target=aarch64-linux-android24 -shared -fPIC -O2 -std=c++17 -Ibuild
 | 属性 | 默认 | 读取 | 作用 |
 |---|---|---|---|
 | `iso.patchring` | 1 | 缓存 | ring buffer type-5 补丁：QTI HAL 的 `PacketBuff::AddBuffNode` 分发表把 type 5 当成错误路径，ISO 包全被丢弃。必须为 1 |
-| `cig.maxlat` | 10 | 实时 | 把 `0x2062` 的 Max_Transport_Latency 截到 N ms（0=关）。实测必要，见下 |
+| `cig.maxlat` | 20 | 实时 | 把 `0x2062` 的 Max_Transport_Latency 截到 N ms（0=关）。实测必要，见下 |
 
-`cig.maxlat=10` 的实测依据（00680 固件 + 已打补丁的 HAL，数据取自 btsnoop 里的 `LE CIS Established` 事件）：
+`cig.maxlat` 的实测依据（00680 固件 + 已打补丁的 HAL，数据取自 btsnoop 里的 `LE CIS Established` 事件）：
 
 - **不截**：控制器选 `ISO_Interval=40ms`、`Transport Latency=84570µs`，in-flight 打满 22/22，
   流建立瞬间丢 6–8 包（`btm_iso_impl.h:562 … iso credits: 0`）；原因是长 ISO 间隔下首包到第一个 NCP
   之间 credit 恒为 0。
 - **截到 10ms**：`10ms` / `7210µs`、in-flight 8/22、零丢包。
+- **截到 20ms（当前默认）**：155 B 时控制器仍给 ISO 间隔 10 ms、BN=1、NSE=4，但 FT 从 1 变成 2，
+  传输延迟 8330 → 18330 µs；在途包数和 10 ms 时相同，建流无丢包。一个包在本间隔没送到，还能在下一个间隔重传，
+  见 `root-causes.md` 第 16 节。
 
 ### 已删除的实验开关
 
