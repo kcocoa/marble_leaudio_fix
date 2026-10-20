@@ -13,12 +13,13 @@
      BLE 输入必须声明，否则 LE Audio 设备在 AudioPolicy 中不可用（docs/dead-ends.md 第 6 节）
   3. 音频策略: 去掉 primary 模块 "A2DP In" 端口的 encodedFormats="AUDIO_FORMAT_LC3"
      （原厂为高通硬件 offload 所写；与已验证可用的配置保持一致）
-  4. LE Audio 预设: Media 列表里把 VND_Two-OneChan…155octs 挪到最前。
+  4. LE Audio 预设: Media 列表里把两条 155 B 预设提前，单耳和双耳都选 124 kbps。
      两只耳机的 Sink PAC 声明每帧最多 155 B（48 kHz、10 ms 即 124 kbps），这是它们支持的最高码率。
-     AOSP 的预设里单耳有 155 B 的 VND_One-OneChan，双耳的 VND_Two-OneChan 却排在 120 B 的标准预设之后，
-     轮不到。单耳播放时放入第二只耳机，栈重新选配置，120 B 和已有的 155 B 不一致，
-     AddCisToStreamConfiguration 断言失败，蓝牙进程 abort。让双耳也选 155 B，前后一致
-     （docs/root-causes.md 第 15 节）。
+     Android 17 原厂把双耳的 VND_Two-OneChan…155octs 排在 120 B 的 Two-OneChan 48_4 之后，
+     把单耳的 VND_One-OneChan…155octs 排在 120 B 的 One-OneChan 48_4 之后，两条都轮不到。
+     单耳若先匹配到 155 B、第二只耳机加入时双耳重配成 120 B，
+     AddCisToStreamConfiguration 断言 155!=120，蓝牙进程 abort（docs/root-causes.md 第 15 节）。
+     双耳那条挪到 Media 最前；单耳那条挪到 One-TwoChan 24_2 之前（紧挨在 One-OneChan 48_* 前面）。
      已知代价：单耳播放时放入第二只耳机，控制器有时拒绝追加第二个 CIS（0x1e），表现为"在播放但没声音"，
      暂停再播放即可（两个 CIS 一起建不受影响）。
      想要稳一点就删掉 Media 里的 VND_One-OneChan…155octs，单双耳都回到 120 B。
@@ -150,6 +151,20 @@ def patch_policy(path):
 
 
 SCEN_TWO = "VND_Two-OneChan-SnkAse-Lc3_48_2_155octs_High_Reliability_2"
+SCEN_ONE = "VND_One-OneChan-SnkAse-Lc3_48_2_155octs_High_Reliability_2"
+# 单耳 155 B 插到这条前面：它是 One-TwoChan 48_* 之后的第一条，后面才是 One-OneChan 48_4（120 B）
+SCEN_ONE_BEFORE = "One-TwoChan-SnkAse-Lc3_24_2_Balanced_Reliability"
+
+
+def _items(body):
+    return [x.strip().rstrip(",").strip('"') for x in body.strip().splitlines() if x.strip()]
+
+
+def _take_line(body, name):
+    line = re.search(r'^([ \t]*)"%s",\n' % re.escape(name), body, re.M)
+    if not line:
+        die(f"Media 列表里找不到 {name}")
+    return body.replace(line.group(0), "", 1), line.group(0)
 
 
 def patch_scenarios(path):
@@ -159,19 +174,29 @@ def patch_scenarios(path):
         die(f"{path}: 找不到 Media 场景")
     end = s.index("]", m.end())
     body = s[m.end():end]
-    items = [x.strip().rstrip(",").strip('"') for x in body.strip().splitlines()]
-    if items.count(SCEN_TWO) != 1:
-        die(f"{path}: Media 列表里 {SCEN_TWO} 不是恰好一条")
-    if items[0] == SCEN_TWO:
+    items = _items(body)
+    for name in (SCEN_TWO, SCEN_ONE, SCEN_ONE_BEFORE):
+        if items.count(name) != 1:
+            die(f"{path}: Media 列表里 {name} 不是恰好一条")
+    one_at = items.index(SCEN_ONE_BEFORE)
+    if items[0] == SCEN_TWO and items[one_at - 1] == SCEN_ONE:
         print("[=] Media 预设顺序已改，跳过")
         return
-    line = re.search(r'^([ \t]*)"%s",\n' % re.escape(SCEN_TWO), body, re.M)
-    indent = line.group(1)
-    body = body.replace(line.group(0), "", 1)
-    s = s[:m.end()] + f'{indent}"{SCEN_TWO}",\n' + body + s[end:]
+    changed = []
+    if items[0] != SCEN_TWO:
+        body, line = _take_line(body, SCEN_TWO)
+        body = line + body
+        changed.append(f"{SCEN_TWO} 挪到最前")
+    items = _items(body)
+    if items[items.index(SCEN_ONE_BEFORE) - 1] != SCEN_ONE:
+        body, line = _take_line(body, SCEN_ONE)
+        anchor = re.search(r'^([ \t]*)"%s",\n' % re.escape(SCEN_ONE_BEFORE), body, re.M)
+        body = body[:anchor.start()] + line + body[anchor.start():]
+        changed.append(f"{SCEN_ONE} 挪到 {SCEN_ONE_BEFORE} 之前")
+    s = s[:m.end()] + body + s[end:]
     json.loads(s)
     open(path, "w", encoding="utf-8").write(s)
-    print(f"[✓] LE Audio 预设: {SCEN_TWO} 挪到 Media 最前: {path}")
+    print("[✓] LE Audio 预设: " + "；".join(changed) + f": {path}")
 
 
 def main():

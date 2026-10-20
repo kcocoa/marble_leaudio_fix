@@ -62,15 +62,18 @@ path = sys.argv[1]
 
 # (offset, 期望原厂字节 or None, 目标字节, 说明)
 # None = 不校验原值，按空函数化语义写入（仍校验入口 paciasp 未被动过）
+# Android 17 / com.android.bt 对应的 vendor audio.bluetooth.default.so
+# （NEEDED android.hardware.bluetooth.audio-V6-ndk.so，符号 UpdateSinkMetadata @ 0x11548）。
+# Android 16 那份从 0x11544 开始，且只链 V5，在 17 上 dlopen 失败，不能再套用旧偏移。
 GUARDS = [
-    (0x11544, "d503233f", "UpdateSinkMetadata 入口 paciasp 必须原样（BTI 落点，改了必 SIGILL）"),
+    (0x11548, "d503233f", "UpdateSinkMetadata 入口 paciasp 必须原样（BTI 落点，改了必 SIGILL）"),
 ]
 PATCHES = [
-    # 注意：不要改 init_session_type（0x135cc/0x135e8/0x13620）的会话号——那是硬件
-    # offload 尝试期间的补丁，软件编码方案下会让音频 HAL 找错会话（docs/dead-ends.md 第 1 节）
+    # 注意：不要改 init_session_type 的会话号——那是硬件 offload 尝试期间的补丁，
+    # 软件编码方案下会让音频 HAL 找错会话（docs/dead-ends.md 第 1 节）
     # UpdateSinkMetadata() 整体空函数化：sub sp,sp,#0x90 -> autiasp ; stp x29,x30 -> ret
-    (0x11548, None,       "d50323bf", "sub sp,sp,#0x90 -> autiasp（与入口 paciasp 配对）"),
-    (0x1154c, None,       "d65f03c0", "stp x29,x30,[sp,#0x40] -> ret（函数体其余部分不可达）"),
+    (0x1154c, "d10243ff", "d50323bf", "sub sp,sp,#0x90 -> autiasp（与入口 paciasp 配对）"),
+    (0x11550, "a9037bfd", "d65f03c0", "stp x29,x30,[sp,#0x30] -> ret（函数体其余部分不可达）"),
 ]
 
 blob = bytearray(open(path, "rb").read())
@@ -119,7 +122,7 @@ if [ "$DO_JNI" = "1" ]; then
   if [ ! -f "$SRC" ]; then
     warn "缺少 $SRC（先跑 scripts/dump_device_binaries.sh）"
   else
-    echo "[*] libbluetooth_jni.so 补丁（奇数帧长丢 1 字节，6 处）"
+    echo "[*] libbluetooth_jni.so 补丁（奇数帧长丢 1 字节，Encode 1 处）"
     python3 "$HERE/patch/patch_bt_jni_odd_octets.py" "$SRC"
     ok "libbluetooth_jni.so -> $SRC"
   fi

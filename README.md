@@ -18,7 +18,7 @@
 | 项目 | 要求 |
 |---|---|
 | 设备 | Redmi Note 12 Turbo（`marble`，SM7475，`ro.boot.product.vendor.sku=ukee`） |
-| 系统 | LineageOS 23.2 / Android 16 |
+| 系统 | LineageOS 24 / Android 17（`audio.bluetooth.default.so` 必须是链 `bluetooth.audio-V6-ndk` 的原厂件；23.2 的 V5 二进制在 17 上加载失败） |
 | Root | KernelSU，并已安装挂载用的**元模块**：**依赖 hybrid_mount，且不能用 overlayfs 模式**，见下 |
 | 耳机 | LE Audio 单播（unicast）耳机 |
 
@@ -44,8 +44,8 @@ vendor 文件（含蓝牙固件）都由元模块挂载，标签由 `customize.s
 - **开启 LE Audio 单播相关 profile**，走软件 LC3 编码（本机高通 BSP 不支持 LE Audio 硬件 offload）
 - **修补高通蓝牙 HAL**：让它能收发 LE Audio 音频数据包（ISO），并以 HIDL 1.1 接口暴露给系统
 - **shim 层**：控制 ISO 数据的发送节奏，避免蓝牙芯片缓冲溢出
-- **修复单耳"风声"**：蓝牙栈对奇数帧长（如 155 B 的厂商预设）每帧少发 1 字节，补丁 `libbluetooth_jni.so`（仅 APEX `361099999`）；
-  并让双耳也用 155 B 预设（耳机声明的最高码率，124 kbps，AOSP 里只有单耳用它），避免单耳播放时放入第二只耳机导致蓝牙崩溃
+- **修复单耳"风声"**：蓝牙栈对奇数帧长（如 155 B 的厂商预设）缓冲区少 1 字节，补丁 `libbluetooth_jni.so`（仅 APEX `370399999`，改 `Encode` 一处）；
+  并让单耳、双耳都用 155 B 预设（耳机声明的最高码率，124 kbps），避免单耳播放时放入第二只耳机导致蓝牙崩溃
 - **补齐音频配置**：LE Audio codec 能力声明、音频路由
 - **替换蓝牙固件**为高通上游 `2.1.0-00680` 版本（ISO 缓冲 3 → 22，消除双耳卡顿）
 

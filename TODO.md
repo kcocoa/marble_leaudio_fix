@@ -18,7 +18,8 @@
    并在建流后立刻拉 btsnoop（滚动日志只保留约 10 分钟）；再试一次关掉 shim 的截断（`persist.vendor.leaudio.cig.maxlat=0`；默认已从 10 改成 20 ms，FT=2，
    这对追加 CIS 有没有影响也没测过）。
 
-3. 广播（BIS）路径也用同一个 `Encode`，奇数帧长时发送长度会比真实长度多 1 字节（原来是少 1 字节）。
+3. 广播（BIS）路径如果仍用 `vector.size()*2` 当发送长度，`Encode` 向上取整后奇数帧长会比真实长度多 1 字节
+   （Android 16 上原来是少 1 字节；Android 17 的单播发送已经直接用 `octets_per_codec_frame`，不受这个影响）。
    没有用到广播，没测。
 
 ## 可以考虑：重写 `audio.bluetooth.default.so` 的补丁方式

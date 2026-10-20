@@ -24,8 +24,8 @@ module/
 ├── customize.sh                      安装时设置文件的 SELinux 标签和属主
 ├── post-mount.sh                     开机时把 apex/ 下的文件用 hybrid_mount 的 vfs 规则重定向到 /apex
 ├── apex/com.android.bt/              （均不入库，从设备导出）
-│   ├── lib64/libbluetooth_jni.so       蓝牙栈，6 处补丁（奇数帧长）
-│   └── etc/bluetooth/le_audio/audio_set_scenarios.json   调试入口，要改预设就改这个文件；与原厂只差一处（双耳 155 B 预设挪到 Media 最前）
+│   ├── lib64/libbluetooth_jni.so       蓝牙栈，1 处补丁（Encode 向上取整，奇数帧长）
+│   └── etc/bluetooth/le_audio/audio_set_scenarios.json   调试入口，要改预设就改这个文件；与原厂只差 Media 里两条 155 B 预设的顺序
 └── vendor/
     ├── bt_firmware/image/hpbtfw21.tlv  上游固件 00680（脚本下载，不入库）
     ├── lib64/hw/                     （均不入库）

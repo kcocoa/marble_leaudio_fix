@@ -18,8 +18,8 @@
 #   vendor/lib64/hw/audio.bluetooth.default.so                  原厂音频 HAL
 #   vendor/etc/vintf/manifest_ukee.xml                          活动 SKU 的 VINTF manifest
 #   vendor/etc/audio/sku_ukee/audio_policy_configuration.xml    活动 SKU 的音频策略
-#   apex/com.android.bt/lib64/libbluetooth_jni.so               蓝牙栈（APEX 361099999）
-#   apex/com.android.bt/etc/bluetooth/le_audio/audio_set_scenarios.json   LE Audio 预设场景（原厂件；patch_vendor_configs.py 会删一条）
+#   apex/com.android.bt/lib64/libbluetooth_jni.so               蓝牙栈（APEX 370399999）
+#   apex/com.android.bt/etc/bluetooth/le_audio/audio_set_scenarios.json   LE Audio 预设场景（原厂件；patch_vendor_configs.py 会改 Media 顺序）
 # --with-build-deps: 追加 /system/lib64/{libhidlbase,libutils,libc++}.so 到 build/lib/（编译 shim 用）
 # --all: 追加原厂固件/NV、HAL 服务二进制到 dump/（仅取证用）
 set -euo pipefail
@@ -45,7 +45,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODDIR="${MODDIR:-$HERE/module}"
 ADB="adb -s $SERIAL"
 MOD=/data/adb/modules/leaudio_marble_fix
-APEX_VER=361099999   # 补丁偏移按这个版本的 com.android.bt 校准
+APEX_VER=370399999   # 补丁偏移按这个版本的 com.android.bt 校准
 
 command -v adb >/dev/null || { echo "[x] adb 不在 PATH"; exit 1; }
 [ "$($ADB get-state 2>/dev/null || true)" = "device" ] || { echo "[x] 设备 $SERIAL 不在线"; exit 1; }

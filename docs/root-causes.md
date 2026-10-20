@@ -490,13 +490,22 @@ Media 列表里，`VND_` 前缀的预设
 **证据**：btsnoop 里 4003 个 SDU 全是 154 B（配置 155 B），ISO 包间隔 10.000 ms、序号连续、无丢包；
 用 liblc3 按 155 B 解码坏帧约 2%，按 154 B 约 45%。控制器、固件、耳机、shim 都没问题。
 
-**修复**（`patch/patch_bt_jni_odd_octets.py`，仅 APEX `361099999`，6 处）：
+**修复**（`patch/patch_bt_jni_odd_octets.py`）：
+
+Android 16 / APEX `361099999`（6 处，已退役，不要拿去盖 Android 17 的库）：
 1. `Encode`：samples = `size - size/2`（向上取整，一条指令），偶数帧长的行为不变。
 2. 三个发送点（单 CIS、双 CIS 的左和右）：编译器每处调用两次 `GetDecodedSamples()`，第二次多余，去掉后用腾出的位置算真实长度
    `L = (vector 字节数/2 == byte_count) ? vector 字节数 : byte_count`
    （前者是单 CIS 里一个 CIS 装两个声道，长度 `2*byte_count`；`byte_count` 即 `octets_per_codec_frame`，在栈上 `[sp,#108]`）。
 
-**验证**：补丁后单耳 3979 个 SDU 全是 155 B（控制器 ISO 单包上限正好 155 B，每个 SDU 拆成 151+4 两片），间隔 9.999 ms，
+Android 17 / APEX `370399999`（当前，1 处）：单播发送不再用 `vector.size()*2`。
+`PrepareAndSend` 里双 CIS 的左/右和单声道，`SendIsoData` 的长度就是 `octets_per_codec_frame`
+（`stream_config` 在对象 `+0x8c` 的半字，函数入口存进 `[sp,#0x24]`）；
+单 CIS 装两个声道则是 `num_of_channels * octets_per_codec_frame`。
+所以只改 `Encode`：`0x4cf6a4` 的 `lsr w9, w8, #1` 换成 `sub w9, w8, w8, lsr #1`。
+155 B 的缓冲区从 77 个 int16（154 B，`lc3_encode` 越界 1 字节）变成 78 个（156 B），发出去仍是 155 B。
+
+**验证**（Android 16）：补丁后单耳 3979 个 SDU 全是 155 B（控制器 ISO 单包上限正好 155 B，每个 SDU 拆成 151+4 两片），间隔 9.999 ms，
 杂音消失；双耳 120 B 路径（CIS 5 和 6 各 1741 个 SDU）不变；两只耳机同时建流时换成 `VND_Two-OneChan…155octs`（每耳 124 kbps）也正常。
 但 155 B 方案有别的代价（单耳切双耳会崩溃或建不起第二个 CIS），最终默认配置没有采用，见第 15 节。
 过程中还确认：不碰 APEX、不用 bind mount，用 hybrid_mount 的 vfs 规则重定向 `/apex` 下的文件，蓝牙进程重启后仍然有效（见 architecture.md 2.7）。

@@ -69,17 +69,20 @@ AudioFlinger
 
 `libbluetooth_qti_real.so` 特性：**file offset == vaddr**，反汇编/找符号直接用绝对地址。
 
-**`audio.bluetooth.default.so`（原厂 md5 `1b96c842…`）**：
+**`audio.bluetooth.default.so`（Android 17 原厂 md5 `3fd10f0f…`，NEEDED `bluetooth.audio-V6-ndk` + `audio.common-V5-ndk`）**：
 
 只改这两处。硬件 offload 尝试期间曾改过 `init_session_type` 的 SessionType 映射
 （见 dead-ends.md 第 1 节），软件编码方案**不需要**，也不应打。
 
+Android 16 的同一文件（md5 `1b96c842…`，从 `0x11544` 打补丁，只链 V5 / audio.common V4）
+在 Android 17 上缺库，`dlopen` 失败，AudioPolicy 整段丢弃名为 `bluetooth` 的 HW module。
+
 | 地址 | 原值 | 改后 | 作用 |
 |---|---|---|---|
-| `0x11548` | `sub sp, sp, #0x90` | `autiasp` | 与入口 `paciasp` 配对 |
-| `0x1154c` | `stp x29, x30, [sp,#0x40]` | `ret` | `BluetoothAudioPortAidl::UpdateSinkMetadata` 变空函数 → HAL 不再把录音元数据转给栈（root-causes 第 11 节） |
+| `0x1154c` | `sub sp, sp, #0x90` | `autiasp` | 与入口 `paciasp` 配对 |
+| `0x11550` | `stp x29, x30, [sp,#0x30]` | `ret` | `BluetoothAudioPortAidl::UpdateSinkMetadata` 变空函数 → HAL 不再把录音元数据转给栈（root-causes 第 11 节） |
 
-**入口 `0x11544` 的 `paciasp` 绝不能改**：它同时是 BTI 落点。函数经 PLT 被 `br` 间接调用，
+**入口 `0x11548` 的 `paciasp` 绝不能改**：它同时是 BTI 落点。函数经 PLT 被 `br` 间接调用，
 把它换成 `ret` 会 `SIGILL (ILL_ILLOPC)`，音频 HAL 每次打开 BLE 输入都崩（实测）。
 同理，任何改函数入口的补丁都要保留 `paciasp`/`bti c`。此库 text 段 file offset == vaddr。
 
@@ -117,7 +120,7 @@ AudioFlinger
 
 ### 2.7 `/apex` 重定向（`apex/`，由 `post-mount.sh` 加 vfs 规则）
 
-蓝牙栈（`libbluetooth_jni.so` 和 LE Audio 预设 JSON）在 LineageOS 签名的 APEX `com.android.bt@361099999` 里，
+蓝牙栈（`libbluetooth_jni.so` 和 LE Audio 预设 JSON）在 LineageOS 签名的 APEX `com.android.bt@370399999` 里，
 **不能重打包**（没有签名密钥），元模块的 `system/apex/...` 也挂不到 `/apex`（只会建 `/system/apex/...` 的虚拟路径）。
 
 做法：模块的 `apex/<路径>` 对应 `/apex/<路径>`，`post-mount.sh` 对每个文件执行
@@ -126,18 +129,20 @@ AudioFlinger
 - hybrid_mount 的 vfs 是**内核里的路径重定向**，对所有进程生效，不依赖挂载命名空间，蓝牙进程重启不丢
   （bind mount 做不到：`com.android.bluetooth` 每次重启换 PID 和挂载命名空间）。
 - 规则**只在运行时有效**，每次开机重新加；模块禁用或删除后下次开机自然消失。
-- 规则按 inode 生效，`/apex/com.android.bt` 和 `/apex/com.android.bt@361099999` 两个路径都会看到替换后的内容。
+- 规则按 inode 生效，`/apex/com.android.bt` 和 `/apex/com.android.bt@370399999` 两个路径都会看到替换后的内容。
   所以要导出原厂件，不能读 `/apex`，`dump_device_binaries.sh` 改从解压 APEX 镜像里取。
-- APEX 版本不是 `361099999` 时脚本直接跳过（补丁偏移按该版本校准，拿旧文件替换新版本会崩）。
+- APEX 版本不是 `370399999` 时脚本直接跳过（补丁偏移按该版本校准，拿旧文件替换新版本会崩）。
 - 没有 hybrid-mount 时脚本只打日志后退出，不影响其他部分。
 - 调试：改模块里的文件后 `sh post-mount.sh`（同一路径的规则会被替换），再 `cmd bluetooth_manager disable/enable`。
 
-`audio_set_scenarios.json` 是调试入口：以后要换预设，直接改模块里这个文件。目前和原厂只差一行顺序：
-`patch_vendor_configs.py` 把 Media 里的 `VND_Two-OneChan…155octs` 挪到最前，让双耳也选 155 B（耳机 PAC 声明的最高，124 kbps），
-和单耳一致，避免单耳切双耳时蓝牙崩溃（root-causes.md 第 15 节）。
+`audio_set_scenarios.json` 是调试入口：以后要换预设，直接改模块里这个文件。目前和原厂只差 Media 里的两处顺序：
+`patch_vendor_configs.py` 把 `VND_Two-OneChan…155octs` 挪到最前，把 `VND_One-OneChan…155octs` 挪到
+`One-TwoChan 24_2` 之前（Android 17 原厂把它排在 120 B 的 `One-OneChan 48_4` 后面，单耳会先匹配到 120 B）。
+单耳和双耳都选 155 B（耳机 PAC 声明的最高，124 kbps），避免单耳切双耳时蓝牙崩溃（root-causes.md 第 15 节）。
 已知代价：单耳播放时再放入第二只耳机，控制器有时拒绝追加第二个 CIS（0x1e），暂停再播放即可恢复。
 
-`libbluetooth_jni.so` 的补丁见 `patch/patch_bt_jni_odd_octets.py`，根因和证据见 root-causes.md 第 14 节。
+`libbluetooth_jni.so` 的补丁见 `patch/patch_bt_jni_odd_octets.py`（`370399999` 只改 `Encode` 一处，`0x4cf6a4`），
+根因和证据见 root-causes.md 第 14 节。Android 17 的单播发送长度已经是 `octets_per_codec_frame`，不再改发送点。
 
 ## 3. 构建配方
 
